@@ -1,11 +1,11 @@
-import {align,strongestResistances} from './analysis.js';
+import {align,strongestResistances,oiLiquidationEstimates} from './analysis.js';
 const $=id=>document.getElementById(id);
 const colors=['#d7f58a','#8aaef5','#d69bf5','#efb679','#67d9d7','#f58ca5'];
 const steps={'1m':60000,'5m':300000,'15m':900000,'1h':3600000,'4h':14400000,'1d':86400000};
 const SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','FETUSDT','XRPUSDT'];
 const coinColor=s=>colors[Math.max(0,SYMBOLS.indexOf(s))];
 const assetName=s=>s==='FETUSDT'?'Fetch.ai (FET)':s.replace('USDT','');
-const state={markets:[],selected:['BTCUSDT','FETUSDT'],series:[],times:[],values:[],mode:'split',dragMode:'pan',panDragging:false,axisRanges:{},chartViews:{},syncZoom:false,syncAxis:{},activeChart:null,middleZoomKey:null,expandedChart:null,chartHeights:{},resizingChart:false,expandedFromFullscreen:false,resistanceSelection:null,axisDragging:false,measurement:null,candles:[],view:null,cursor:null,pinned:false,hits:[],revision:0,busy:false,dirty:false,scanned:false,failures:0,lastSuccess:0,rollingMs:7*86400000,loadedSymbols:[],loadedStart:0,interval:'1h'};
+const state={markets:[],selected:['BTCUSDT','FETUSDT'],series:[],times:[],values:[],mode:'split',dragMode:'pan',panDragging:false,axisRanges:{},chartViews:{},syncZoom:false,syncAxis:{},activeChart:null,middleZoomKey:null,expandedChart:null,chartHeights:{},resizingChart:false,expandedFromFullscreen:false,resistanceSelection:null,oiEnabled:true,oiData:[],oiRevision:0,oiFetchedAt:0,liquidationMode:'off',liquidationZones:[],liquidationBusy:false,liquidationRevision:0,liquidationStatus:null,modelSummaries:[],axisDragging:false,measurement:null,candles:[],view:null,cursor:null,pinned:false,hits:[],revision:0,busy:false,dirty:false,scanned:false,failures:0,lastSuccess:0,rollingMs:7*86400000,loadedSymbols:[],loadedStart:0,interval:'1h'};
 const pct=n=>`${n>=0?'+':''}${n.toFixed(2)} %`;
 const priceFormat=new Intl.NumberFormat('de-DE',{maximumFractionDigits:2}),smallPriceFormat=new Intl.NumberFormat('de-DE',{maximumFractionDigits:6});
 const money=n=>(Math.abs(n)<1?smallPriceFormat:priceFormat).format(n);
@@ -62,7 +62,7 @@ async function load(refresh=false){
  const series=await api('/api/history?'+new URLSearchParams({symbols:state.selected.join(','),interval,start,end,live:following?'1':'0'}));
  const aligned=align(series);
  if(aligned.times.length<3)throw Error('Weniger als 3 gemeinsame abgeschlossene Kerzen. Bitte Zeitraum vergrößern oder andere Märkte wählen.');
- if(!refresh){state.measurement=null;state.axisRanges={};state.chartViews={};state.syncAxis={};}state.series=series;state.times=aligned.times;state.values=aligned.values;state.candles=series.map(s=>{const map=new Map(s.points.map(p=>[p.time,p]));return aligned.times.map(t=>map.get(t))});state.interval=interval;state.view=[0,state.times.length-1];state.cursor=null;state.pinned=false;state.dirty=false;state.failures=0;state.lastSuccess=Date.now();state.loadedSymbols=series.map(s=>s.symbol);state.loadedStart=start;state.rollingMs=end-start;
+ if(!refresh){state.measurement=null;state.axisRanges={};state.chartViews={};state.syncAxis={};}state.liquidationRevision++;state.liquidationZones=[];state.series=series;state.times=aligned.times;state.values=aligned.values;state.candles=series.map(s=>{const map=new Map(s.points.map(p=>[p.time,p]));return aligned.times.map(t=>map.get(t))});state.interval=interval;state.view=[0,state.times.length-1];state.cursor=null;state.pinned=false;state.dirty=false;state.failures=0;state.lastSuccess=Date.now();state.loadedSymbols=series.map(s=>s.symbol);state.loadedStart=start;state.rollingMs=end-start;
  if(refresh&&oldView&&oldView[1]<state.times.at(-2)){state.view=oldView.map(nearestTime);if(state.view[0]>=state.view[1])state.view=[0,state.times.length-1]}if(refresh&&oldPinned&&oldCursor>=state.times[0]&&oldCursor<=state.times.at(-1)){state.cursor=nearestTime(oldCursor);state.pinned=true}
  $('refresh-status').textContent=(following?'Live · ':'Geladen · ')+new Date().toLocaleTimeString('de-DE')+(following?' · 15s Aktualisierung':'');
  $('connection').textContent=following?'● Binance LIVE · 15s':'● Binance · Historie';
@@ -70,7 +70,7 @@ async function load(refresh=false){
  $('chart-subtitle').textContent=`${date(state.times[0])} — ${date(state.times.at(-1))} · ${interval}-Kerzen`;
  $('coverage').textContent=`${state.times.length.toLocaleString('de-DE')} gemeinsame Kerzen · alle Zeiten UTC`;
  if(series.some(s=>s.points.length!==state.times.length))notice('Nur gemeinsame Kerzen aller Märkte werden verglichen. Datenlücken werden nicht aufgefüllt.');
- const volumeChoice=$('volume-market').value;$('volume-market').innerHTML=series.map((s,i)=>`<option value="${i}">${escape(s.symbol)}</option>`).join('');if(refresh&&volumeChoice)$('volume-market').value=volumeChoice;resetScan();renderCharts();renderCards();if(hadScan)runScan(false);
+ const volumeChoice=$('volume-market').value;$('volume-market').innerHTML=series.map((s,i)=>`<option value="${i}">${escape(s.symbol)}</option>`).join('');if(refresh&&volumeChoice)$('volume-market').value=volumeChoice;resetScan();renderCharts();renderCards();if(hadScan)runScan(false);if(state.liquidationMode!=='off')refreshLiquidations();if(state.oiEnabled)refreshOpenInterest(!refresh);
  }catch(e){$('data-badge').textContent=state.series.length?'ALTE DATEN':'KEINE DATEN';state.failures++;$('connection').textContent='○ Verbindung unterbrochen · alte Daten';$('refresh-status').textContent='Datenstand unverändert · Abruf fehlgeschlagen';if(state.failures>=3||/limit|begrenzt/i.test(e.message)){$('auto-live').checked=false;$('end').disabled=false;$('refresh-status').textContent='Live wegen Abruffehlern pausiert · erneut verbinden';}notice(e.name==='AbortError'?'Zeitüberschreitung. Bitte kürzeren Zeitraum wählen oder erneut versuchen.':e.message)}
  finally{state.busy=false;setLoading(false);$('live').disabled=false}
 }
@@ -115,7 +115,8 @@ function renderCharts(){
  let min=Infinity,max=-Infinity;for(const v of vals)for(const n of v){min=Math.min(min,n);max=Math.max(max,n)}
  if(candleMode)for(const k of group)for(let i=a;i<=b;i++){min=Math.min(min,transform(state.candles[k][i].low,k));max=Math.max(max,transform(state.candles[k][i].high,k))}
  const zones=state.scanned?state.hits.filter(z=>group.some(k=>state.series[k].symbol===z.symbol)):[];
- for(const zone of zones){const k=group.find(k=>state.series[k].symbol===zone.symbol);min=Math.min(min,transform(zone.low,k));max=Math.max(max,transform(zone.high,k))}
+ const liquidations=state.liquidationZones.filter(z=>group.some(k=>state.series[k].symbol===z.symbol));
+ for(const zone of [...zones,...liquidations]){const k=group.find(k=>state.series[k].symbol===zone.symbol);min=Math.min(min,transform(zone.low,k));max=Math.max(max,transform(zone.high,k))}
  const padding=(max-min)*.12||Math.max(Math.abs(max)*.01,1);min-=padding;max+=padding;
  const rangeKey=state.mode+':'+(state.mode==='split'?state.series[group[0]].symbol:'all')+':'+$('scale').value;
  const baseMin=min,baseMax=max,syncSpec=state.syncZoom&&state.mode==='split'?state.syncAxis[$('scale').value]:null;
@@ -136,14 +137,17 @@ function renderCharts(){
  content+='</g>';
  }}
  for(const zone of zones){const k=group.find(k=>state.series[k].symbol===zone.symbol),top=y(transform(zone.high,k)),bottom=y(transform(zone.low,k));content+=`<rect x="14" y="${top-1}" width="${w-87}" height="${Math.max(2,bottom-top)}" fill="${coinColor(zone.symbol)}" fill-opacity=".18" stroke="${coinColor(zone.symbol)}" stroke-dasharray="5 4"/><text x="20" y="${Math.max(36,top-5)}" style="fill:${coinColor(zone.symbol)}">${escape(assetName(zone.symbol))} R${zone.rank} ${money(zone.low)} – ${money(zone.high)} USDT</text>`}
+ for(const zone of liquidations){const k=group.find(k=>state.series[k].symbol===zone.symbol),top=y(transform(zone.high,k)),bottom=y(transform(zone.low,k)),color=zone.side==='long'?'#f48b9c':'#67d9d7',focus=$('chart-focus').value,opacity=state.mode==='overlay'&&focus!=='all'&&focus!==zone.symbol?.12:1;
+ content+=`<g opacity="${opacity}"><rect x="14" y="${top}" width="${w-87}" height="${Math.max(2,bottom-top)}" fill="${color}" fill-opacity="${zone.kind==='observed'?.2:(.05+.3*zone.intensity)}" stroke="${color}" stroke-dasharray="${zone.kind==='observed'?'2 3':'7 5'}"/><text x="${w-80}" text-anchor="end" y="${Math.max(36,top-4)}" style="fill:${color};font-size:10px">${escape(assetName(zone.symbol))} ${zone.side==='long'?'Long':'Short'} ${zone.kind==='estimated'?'≈ '+compactAmount(zone.estimatedNotional):compactAmount(zone.notional)} USDT<title>${zone.kind==='estimated'?'Modellschätzung':'Gemeldete Snapshots'} · ${money(zone.low)} – ${money(zone.high)} USDT</title></text></g>`;
+ }
  content+='</g>'+`<g transform="translate(0,${extra})">${volumeBars(group,w,a,b)}</g>`;
  content+=`<rect class="price-axis-hit" x="${w-72}" y="20" width="72" height="${192+extra}" fill="transparent" style="cursor:ns-resize"><title>Achse ziehen: vertikal skalieren. Doppelklick: automatisch skalieren.</title></rect>`;
  content+=`<g class="measurement-overlay" pointer-events="none"></g><g class="cursor" pointer-events="none"></g><rect class="selection" y="20" height="${260+extra}" fill="#d7f58a18" stroke="#d7f58a66" visibility="hidden"/>`;
  wrap.innerHTML=(state.mode==='split'?`<span class="chart-name">${escape(state.series[group[0]].symbol)}</span>`:'')+`<svg style="height:${h}px" viewBox="0 0 ${w} ${h}" role="img" aria-label="Interaktiver Kursvergleich" tabindex="0">${content}</svg>`;
- const zoomControls=document.createElement('div');zoomControls.className='chart-zoom-controls';zoomControls.innerHTML='<button type="button" class="zoom-out" aria-label="Chart verkleinern" title="Herauszoomen">−</button><button type="button" class="zoom-in" aria-label="Chart vergrößern" title="Hineinzoomen">+</button>';wrap.append(zoomControls);
+ const zoomControls=document.createElement('div');zoomControls.className='chart-zoom-controls';zoomControls.innerHTML='<button type="button" class="zoom-out" aria-label="Chart verkleinern" title="Herauszoomen">−</button><button type="button" class="zoom-in" aria-label="Chart vergrößern" title="Hineinzoomen">+</button>';zoomControls.style.top=(h-70)+'px';zoomControls.style.bottom='auto';wrap.append(zoomControls);
  zoomControls.querySelector('.zoom-in').onclick=()=>zoomTime(.7,svg._chart);zoomControls.querySelector('.zoom-out').onclick=()=>zoomTime(1/.7,svg._chart);
 
- const singleFullscreen=document.createElement('button');singleFullscreen.className='single-fullscreen';singleFullscreen.type='button';singleFullscreen.textContent=state.expandedChart===chartKey?'⛶ Zurück':'⛶';singleFullscreen.title=state.expandedChart===chartKey?'Alle Charts wieder anzeigen':'Diesen Chart im Vollbild anzeigen';singleFullscreen.setAttribute('aria-label',singleFullscreen.title);singleFullscreen.setAttribute('aria-pressed',String(state.expandedChart===chartKey));singleFullscreen.onclick=()=>toggleSingleChart(chartKey);wrap.append(singleFullscreen);
+ const singleFullscreen=document.createElement('button');singleFullscreen.className='single-fullscreen';singleFullscreen.type='button';singleFullscreen.textContent=state.expandedChart===chartKey?'⛶ Zurück':'⛶';singleFullscreen.title=state.expandedChart===chartKey?'Alle Charts wieder anzeigen':'Diesen Chart im Vollbild anzeigen';singleFullscreen.setAttribute('aria-label',singleFullscreen.title);singleFullscreen.setAttribute('aria-pressed',String(state.expandedChart===chartKey));singleFullscreen.onclick=()=>toggleSingleChart(chartKey);singleFullscreen.style.top=(h-29)+'px';singleFullscreen.style.bottom='auto';wrap.append(singleFullscreen);
  if(state.expandedChart===chartKey){
  const handle=document.createElement('div');handle.className='chart-height-handle';handle.setAttribute('role','separator');handle.setAttribute('aria-orientation','horizontal');handle.setAttribute('aria-label','Charthöhe durch Ziehen ändern');handle.setAttribute('aria-valuenow',String(h));handle.setAttribute('aria-valuemin','320');handle.setAttribute('aria-valuemax','1600');handle.tabIndex=0;handle.title='Nach unten ziehen: Chart vergrößern · Doppelklick: Standardhöhe';handle.innerHTML='<span></span>';wrap.append(handle);
  handle.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();const start=e.clientY,pointer=e.pointerId;state.resizingChart=true;area.setPointerCapture(pointer);
@@ -154,7 +158,11 @@ function renderCharts(){
  handle.ondblclick=()=>{delete state.chartHeights[chartKey];renderCharts()};
  handle.onkeydown=e=>{if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();state.chartHeights[chartKey]=Math.max(320,Math.min(1600,h+(e.key==='ArrowDown'?40:-40)));renderCharts();$('chart-area').querySelector('.chart-height-handle')?.focus()}};
  }
+ if(liquidations.length){const readout=document.createElement('div');readout.className='liquidation-readout';readout.setAttribute('aria-label','Liquidationsbeträge unabhängig vom Chartzoom');
+ readout.innerHTML=`<div class="liquidation-readout-heading">${state.liquidationMode==='estimated'?'Geschätztes liquidierbares Volumen · Modellszenarien':'Gemeldete Liquidations-Snapshots'}<small>Preise und Beträge in USDT · unabhängig vom Zoom</small></div><div class="liquidation-readout-list">${liquidations.map(z=>`<div class="liquidation-readout-row"><span style="color:${z.side==='long'?'#f48b9c':'#67d9d7'}">${escape(assetName(z.symbol))} ${z.side==='long'?'Long':'Short'}</span><span class="muted">${money(z.low)} – ${money(z.high)}</span><strong>${z.kind==='estimated'?'≈ ':''}${compactAmount(z.kind==='estimated'?z.estimatedNotional:z.notional)} USDT</strong>${z.kind==='estimated'?`<small>Bandbreite: ${compactAmount(z.lowNotional)} – ${compactAmount(z.highNotional)} USDT</small>`:''}</div>`).join('')}</div>`;wrap.append(readout);
+ }
  const svg=wrap.querySelector('svg');
+ if(state.oiEnabled){const oi=document.createElement('div');oi.className='oi-pane';oi.innerHTML=openInterestPane(group,w,view);wrap.append(oi)}
  const axis=svg.querySelector('.price-axis-hit');
  axis.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();state.axisDragging=true;window.getSelection()?.removeAllRanges();const origin=e.clientY,initial={min,max};area.setPointerCapture(e.pointerId);
  const move=event=>{if(event.pointerId!==e.pointerId)return;event.preventDefault();state.activeChart=chartKey;setAxisRange({rangeKey,baseMin,baseMax},axisRange(initial,event.clientY-origin));scheduleChartRender()};
@@ -203,11 +211,12 @@ function runScan(fit=true){
  });
 }
 function pannedRange(view,total,deltaX,width){const span=view[1]-view[0],shift=Math.round(-deltaX/Math.max(1,width)*span),first=Math.max(0,Math.min(total-1-span,view[0]+shift));return [first,first+span]}
+function pannedAxisRange(initial,deltaY,height){const shift=(initial.max-initial.min)*deltaY/Math.max(1,height);return {min:initial.min+shift,max:initial.max+shift}}
 function startPan(e,svg,area){
- const c=svg._chart,origin=e.clientX,rect=svg.getBoundingClientRect(),initial=[...c.view],pointer=e.pointerId;let moved=false,last=initial;
+ const c=svg._chart,origin=e.clientX,originY=e.clientY,rect=svg.getBoundingClientRect(),initial=[...c.view],pointer=e.pointerId;let moved=false,last=initial,lastY=null;
  state.panDragging=true;area.classList.add('panning');area.setPointerCapture(pointer);
- const move=event=>{if(event.pointerId!==pointer)return;event.preventDefault();if(Math.abs(event.clientX-origin)<3&&!moved)return;moved=true;
- const view=pannedRange(initial,state.times.length,event.clientX-origin,rect.width-87);if(view[0]===last[0]&&view[1]===last[1])return;last=view;setChartView(c.chartKey,view);scheduleChartRender();
+ const move=event=>{if(event.pointerId!==pointer)return;event.preventDefault();if(Math.max(Math.abs(event.clientX-origin),Math.abs(event.clientY-originY))<3&&!moved)return;moved=true;
+ const view=pannedRange(initial,state.times.length,event.clientX-origin,rect.width-87),dy=event.clientY-originY;if(view[0]===last[0]&&view[1]===last[1]&&dy===lastY)return;state.activeChart=c.chartKey;setAxisRange(c,pannedAxisRange(c,dy,(172+c.extra)*rect.height/(320+c.extra)));if(view[0]!==last[0]||view[1]!==last[1])setChartView(c.chartKey,view);last=view;lastY=dy;scheduleChartRender();
  };
  const finish=event=>{if(event.pointerId!==pointer)return;state.panDragging=false;area.classList.remove('panning');area.removeEventListener('pointermove',move);area.removeEventListener('pointerup',finish);area.removeEventListener('pointercancel',finish);if(area.hasPointerCapture(pointer))area.releasePointerCapture(pointer);
  if(!moved&&event.type==='pointerup'){state.cursor=indexAt(event,svg);state.pinned=true;updateCursor();renderCards()}else renderCards();
@@ -250,10 +259,67 @@ function renderMeasurement(){
 for(const mode of ['pan','zoom','measure'])$('drag-'+mode).onclick=()=>{
  state.dragMode=mode;
  for(const m of ['pan','zoom','measure']){$('drag-'+m).classList.toggle('active',mode===m);$('drag-'+m).setAttribute('aria-pressed',String(mode===m))}
- $('drag-hint').textContent=mode==='pan'?'Ziehen zum Verschieben · zum Navigieren zunächst hineinzoomen':mode==='measure'?'Ziehen zum Messen · Schlusskurs am Anfang und Ende · Zeitspanne chronologisch':'Ziehen zum Zoomen · Doppelklick zum Zurücksetzen';
+ $('drag-hint').textContent=mode==='pan'?'Ziehen: links/rechts und oben/unten verschieben · horizontal zunächst hineinzoomen':mode==='measure'?'Ziehen zum Messen · Schlusskurs am Anfang und Ende · Zeitspanne chronologisch':'Ziehen zum Zoomen · Doppelklick zum Zurücksetzen';
  if(mode==='zoom')state.measurement=null;
  if(state.times.length)renderCharts();else renderMeasurement();
 };
+function compactAmount(value){return value>=1e6?(value/1e6).toFixed(1)+' Mio.':value>=1000?(value/1000).toFixed(0)+' Tsd.':Math.round(value).toLocaleString('de-DE')}
+function openInterestPane(group,w,view){
+ const k=state.mode==='overlay'?Number($('volume-market').value||0):group[0],symbol=state.series[k].symbol,data=state.oiData.find(d=>d.symbol===symbol);
+ if(!data)return '<p class="muted">Open Interest wird geladen …</p>';
+ if(data.error)return `<p class="negative">${escape(assetName(symbol))}: ${escape(data.error)}</p>`;
+ const [a,b]=view,left=state.times[a],right=state.times[b],points=data.points.filter(p=>p.time>=left&&p.time<=right);
+ const last=data.points.at(-1),change=data.points.length>1?(last.value/data.points[0].value-1)*100:null;
+ let result=`<div class="oi-title"><strong>Open Interest · ${escape(assetName(symbol))} · Binance USD-M</strong><span>Aktuell ${money(data.currentCoins)} ${escape(assetName(symbol))} · ${date(data.currentTime)}</span></div>`;
+ if(!points.length)return result+'<p class="muted">Keine OI-Historie im sichtbaren Zeitraum. Öffentliche Historie begrenzt auf etwa einen Monat.</p>';
+ let lo=Math.min(...points.map(p=>p.value)),hi=Math.max(...points.map(p=>p.value));const pad=(hi-lo)*.1||hi*.01||1;lo-=pad;hi+=pad;
+ const x=t=>14+(t-left)/(right-left)*(w-87),y=v=>20+(hi-v)/(hi-lo)*60;
+ let path='';points.forEach((p,i)=>path+=`${!i||p.time-points[i-1].time!==data.step?'M':'L'}${x(p.time)},${y(p.value)} `);
+ result+=`<svg class="oi-svg" style="height:108px" viewBox="0 0 ${w} 108" role="img" aria-label="Open Interest in USDT"><line x1="14" y1="80" x2="${w-73}" y2="80" stroke="#26303d"/><path d="${path}" fill="none" stroke="${coinColor(symbol)}" stroke-width="1.8"/><text x="${w-65}" y="25">${(hi/1e6).toFixed(2)}M</text><text x="${w-65}" y="80">${(lo/1e6).toFixed(2)}M</text><text x="14" y="101">USDT · ${escape(data.period)}-Messungen${data.historyClipped?' · Historie begrenzt':''}</text></svg>`;
+ result+=`<p class="muted">Letzter Historienwert: ${money(last.value)} USDT · ${date(last.time)}${change!==null?' · Veränderung geladene OI-Historie '+pct(change):''}</p>`;return result;
+}
+async function refreshOpenInterest(force=false){
+ if(!state.oiEnabled||!state.series.length||!force&&Date.now()-state.oiFetchedAt<60000)return;
+ const revision=++state.oiRevision;state.oiFetchedAt=Date.now();$('open-interest-status').textContent='Open Interest wird von Binance Futures geladen …';
+ try{const end=Math.min(Date.now(),state.times.at(-1));const result=await api('/api/open-interest?'+new URLSearchParams({symbols:state.series.map(s=>s.symbol).join(','),interval:state.interval,start:state.loadedStart,end}));if(revision!==state.oiRevision||!state.oiEnabled)return;state.oiData=result;
+ $('open-interest-status').textContent=result.some(d=>d.error)?'Open Interest teilweise nicht verfügbar · Details am Chart':'Echtes Open Interest · Binance USD-M · Abruf alle 60s · Historie mindestens 5m · keine Liquidationspreis-Verteilung';renderCharts();
+ }catch(e){if(revision!==state.oiRevision)return;state.oiData=state.series.map(s=>({symbol:s.symbol,points:[],error:e.message}));$('open-interest-status').textContent='Open Interest nicht verfügbar · '+e.message;renderCharts()}
+}
+$('open-interest-toggle').onclick=()=>{state.oiEnabled=!state.oiEnabled;state.oiRevision++;$('open-interest-toggle').textContent=state.oiEnabled?'Open Interest an':'Open Interest aus';$('open-interest-toggle').setAttribute('aria-pressed',String(state.oiEnabled));$('open-interest-toggle').classList.toggle('active',state.oiEnabled);$('open-interest-status').hidden=!state.oiEnabled;if(state.oiEnabled)refreshOpenInterest(true);renderCharts()};
+async function refreshLiquidations(){
+ const revision=++state.liquidationRevision,mode=state.liquidationMode;
+ if(mode==='off'){state.liquidationZones=[];renderLiquidations();renderCharts();return}
+ if(!state.series.length){$('liquidation-chart-status').textContent='Zuerst einen Markt laden.';return}
+ state.liquidationZones=[];$('liquidation-chart-status').textContent='Liquidationsansicht wird geladen …';
+ try{
+ if(mode==='estimated'){
+  const end=Math.min(Date.now(),state.times.at(-1));
+  const contexts=await api('/api/open-interest?'+new URLSearchParams({symbols:state.series.map(s=>s.symbol).join(','),interval:state.interval,start:state.loadedStart,end,model:'1'}));
+  if(revision!==state.liquidationRevision||mode!==state.liquidationMode)return;
+  state.modelSummaries=contexts.map(context=>({...oiLiquidationEstimates(context),symbol:context.symbol}));
+  state.liquidationZones=state.modelSummaries.flatMap(summary=>summary.zones.map(z=>({...z,symbol:summary.symbol})));
+  state.liquidationStatus=null;
+ }else{
+  const end=Math.min(Date.now(),state.times.at(-1)),start=Math.max(state.loadedStart,end-7*86400000);
+  const result=await api('/api/liquidations?'+new URLSearchParams({symbols:state.series.map(s=>s.symbol).join(','),start,end}));
+  if(revision!==state.liquidationRevision||mode!==state.liquidationMode)return;
+  state.liquidationZones=result.zones;state.liquidationStatus=result.status;
+ }
+ renderLiquidations();renderCharts();
+ }catch(error){if(revision!==state.liquidationRevision)return;state.liquidationZones=[];$('liquidation-chart-status').textContent='Liquidationsdaten nicht verfügbar · '+error.message;$('liquidation-badge').textContent='NICHT VERFÜGBAR';$('liquidation-info').textContent=error.message;$('liquidation-results').innerHTML='';renderCharts()}
+}
+function renderLiquidations(){
+ const mode=state.liquidationMode,zones=state.liquidationZones,status=state.liquidationStatus;
+ const message=mode==='off'?'':mode==='estimated'?'OI-GESTÜTZTES SCHÄTZMODELL · USDT-Beträge sind Hypothesen · keine bekannten Liquidationsbestände':(status?.connected?'Futures-Stream verbunden':'Futures-Stream getrennt · gespeicherte Meldungen')+' · gemeldete Snapshots, keine vollständige Liquidationssumme';
+ $('liquidation-chart-status').textContent=message;$('liquidation-badge').textContent=mode==='off'?'AUSGESCHALTET':mode==='estimated'?'SCHÄTZUNG':status?.connected?'BEOBACHTET · LIVE':'BEOBACHTET · OFFLINE';
+ $('liquidation-info').textContent=mode==='off'?'Oben „Beobachtete Liquidationen“ oder „Geschätzte Liquidationszonen“ wählen.':mode==='estimated'?'OI-gestützte Schätzung: Netto-OI-Zuwächse als hypothetische Einstiege am Futures-Markpreis. Betrag = modellierte Kontraktmenge × geschätzter Liquidationspreis. Bandbreite aus drei Hebelverteilungen, kein statistisches Konfidenzintervall.':('Aufzeichnung seit Serverstart '+date(status?.startedAt||Date.now())+'. '+(status?.error?'Verbindungsfehler: '+status.error+'. ':'')+'Keine Rückbefüllung von Zeiten ohne Aufzeichnung.');
+ if(mode==='off'){$('liquidation-results').innerHTML='';return}
+ const coverageHtml=mode==='estimated'?'<div class="model-coverage">'+state.modelSummaries.map(m=>`<p><strong>${escape(assetName(m.symbol))}</strong> · ${m.error?escape(m.error):`Modelliert: ${(m.coverage.long*100).toFixed(0)} % Long / ${(m.coverage.short*100).toFixed(0)} % Short des gemessenen OI · nicht lokalisierbar: Long ${compactAmount(m.unassigned.long)}, Short ${compactAmount(m.unassigned.short)} · Modellstand ${date(m.asOf)}${m.gaps?' · Datenlücken: '+m.gaps:''}`}</p>`).join('')+'</div>':'';
+ if(!zones.length){$('liquidation-results').innerHTML=coverageHtml+'<p>'+ (mode==='estimated'?'Keine Modellzonen im geladenen Zeitraum berechenbar.':'Keine gespeicherten Liquidationsmeldungen für diese Märkte und diesen Zeitraum. Das bedeutet nicht, dass keine Liquidationen stattgefunden haben.')+'</p>';return}
+ $('liquidation-results').innerHTML=coverageHtml+`<table><thead><tr><th>Coin</th><th>Richtung</th><th>Bereich USDT</th><th>${mode==='estimated'?'Geschätzt liquidierbar (USDT)':'Gemeldeter Snapshot-Wert'}</th><th>${mode==='estimated'?'Szenariobandbreite (USDT)':'Snapshots'}</th></tr></thead><tbody>${zones.map(z=>`<tr><td>${escape(assetName(z.symbol))}</td><td style="color:${z.side==='long'?'#f48b9c':'#67d9d7'}">${z.side==='long'?'Long':'Short'}</td><td>${money(z.low)} – ${money(z.high)}</td><td>${mode==='estimated'?'≈ '+compactAmount(z.estimatedNotional):money(z.notional)+' USDT'}</td><td>${mode==='estimated'?compactAmount(z.lowNotional)+' – '+compactAmount(z.highNotional):z.snapshots}</td></tr>`).join('')}</tbody></table>`;
+}
+$('liquidation-mode').onchange=()=>{state.liquidationMode=$('liquidation-mode').value;refreshLiquidations()};
+setInterval(()=>{if(state.liquidationMode!=='off'&&!document.hidden&&!state.busy&&!state.panDragging&&!state.axisDragging&&!state.resizingChart)refreshLiquidations()},60000);
 async function toggleSingleChart(key){
  const panel=$('chart-workspace'),active=document.fullscreenElement===panel||document.webkitFullscreenElement===panel;
  if(state.expandedChart===key){state.expandedChart=null;renderCharts();renderCards();if(active&&!state.expandedFromFullscreen){try{if(document.exitFullscreen)await document.exitFullscreen();else document.webkitExitFullscreen()}catch{}}return}

@@ -84,3 +84,73 @@ export function strongestResistances(points,step){
   return {...z,score:z.touches*2+Math.min(5,rejection/volatility)+Math.log1p(relativeVolume)+recency};
  }).sort((a,b)=>b.score-a.score).slice(0,3).map((z,i)=>({...z,rank:i+1}));
 }
+
+// Scenario model only. No position inventory, leverage distribution, fees or maintenance margin.
+export function estimatedLiquidations(points){
+ const data=points.filter(p=>p.closed!==false&&p.close>0),current=points.at(-1)?.close;
+ if(data.length<3||!current)return [];
+ const low=Array(data.length+1).fill(Infinity),high=Array(data.length+1).fill(-Infinity);
+ for(let i=data.length-1;i>=0;i--){low[i]=Math.min(low[i+1],data[i].low);high[i]=Math.max(high[i+1],data[i].high)}
+ const bins=new Map(),unit=Math.log1p(.0025);
+ for(let i=0;i<data.length;i++){
+  const p=data[i];if(!(p.volume>0))continue;
+  for(const leverage of [10,25,50])for(const side of ['long','short']){
+   const level=p.close*(1+(side==='long'?-1:1)/leverage);
+   if(side==='long'&&(low[i+1]<=level||level>=current)||side==='short'&&(high[i+1]>=level||level<=current))continue;
+   const key=side+':'+Math.floor(Math.log(level)/unit),bottom=Math.exp(Math.floor(Math.log(level)/unit)*unit);
+   if(!bins.has(key))bins.set(key,{side,low:bottom,high:bottom*1.0025,weight:0,kind:'estimated'});
+   bins.get(key).weight+=p.volume/3;
+  }
+ }
+ const zones=[];
+ for(const side of ['long','short']){
+  const ranked=[...bins.values()].filter(z=>z.side===side).sort((a,b)=>b.weight-a.weight);
+  const max=ranked[0]?.weight||1;
+  zones.push(...ranked.slice(0,3).map(z=>({...z,intensity:z.weight/max})));
+ }
+ return zones;
+}
+
+// OI-constrained cohort model. Net OI increases are hypothetical entries, NOT observed positions.
+export function oiLiquidationEstimates(context){
+ const empty={zones:[],coverage:{long:0,short:0},unassigned:{long:0,short:0},error:null};
+ if(context?.error)return {...empty,error:context.error};
+ const points=context?.points||[],marks=context?.marks||[],step=context?.step,current=context?.markPrice;
+ if(points.length<3||!marks.length||!(current>0)||!(context.currentCoins>0)||!(step>0))return {...empty,error:'Zu wenig Futures-OI-/Markpreis-Daten für die Modellberechnung.'};
+ const markMap=new Map(marks.map(p=>[p.time,p])),priors=[[1/3,1/3,1/3],[.6,.3,.1],[.1,.3,.6]],leverage=[10,25,50],mmr=.005,unit=Math.log1p(.005);
+ const results=[];let gaps=0;
+ for(let scenario=0;scenario<priors.length;scenario++){
+  let cohorts=[];
+  for(let i=1;i<points.length;i++){
+   const prev=points[i-1],p=points[i],bar=markMap.get(p.time);
+   if(!bar||p.time-prev.time!==step){if(scenario===0)gaps++;cohorts=[];continue}
+   cohorts=cohorts.filter(c=>c.side==='long'?bar.low>c.level:bar.high<c.level);
+   if(p.coins<prev.coins&&prev.coins>0){const survival=p.coins/prev.coins;cohorts.forEach(c=>c.quantity*=survival)}
+   const increase=p.coins-prev.coins;
+   if(increase>0&&bar.close>0)for(const side of ['long','short'])for(let l=0;l<leverage.length;l++){
+    const level=side==='long'?bar.close*(1-1/leverage[l])/(1-mmr):bar.close*(1+1/leverage[l])/(1+mmr);
+    cohorts.push({side,level,quantity:increase*priors[scenario][l],entry:bar.close});
+   }
+  }
+  cohorts=cohorts.filter(c=>c.side==='long'?c.level<current:c.level>current);
+  // Never assign more contracts to either side than the measured OI supports.
+  for(const side of ['long','short']){
+   const total=cohorts.filter(c=>c.side===side).reduce((sum,c)=>sum+c.quantity,0),factor=total>context.currentCoins?context.currentCoins/total:1;
+   cohorts.filter(c=>c.side===side).forEach(c=>c.quantity*=factor);
+  }
+  const bins=new Map();
+  for(const c of cohorts){const bucket=Math.floor(Math.log(c.level)/unit),key=c.side+':'+bucket;
+   if(!bins.has(key)){const low=Math.exp(bucket*unit);bins.set(key,{side:c.side,low,high:low*1.005,quantity:0,estimatedNotional:0})}
+   const zone=bins.get(key);zone.quantity+=c.quantity;zone.estimatedNotional+=c.quantity*c.level;
+  }
+  results.push({bins,cohorts});
+ }
+ const central=results[0],coverage={},unassigned={};
+ for(const side of ['long','short']){const assigned=central.cohorts.filter(c=>c.side===side).reduce((sum,c)=>sum+c.quantity,0);coverage[side]=assigned/context.currentCoins;unassigned[side]=(context.currentCoins-assigned)*current}
+ const zones=[];
+ for(const side of ['long','short']){
+  const list=[...central.bins.entries()].filter(([,z])=>z.side===side).sort((a,b)=>b[1].estimatedNotional-a[1].estimatedNotional),maximum=list[0]?.[1].estimatedNotional||1;
+  for(const [key,z] of list.slice(0,5)){const amounts=results.map(r=>r.bins.get(key)?.estimatedNotional||0);zones.push({...z,kind:'estimated',intensity:z.estimatedNotional/maximum,lowNotional:Math.min(...amounts),highNotional:Math.max(...amounts),coverage:coverage[side],asOf:points.at(-1).time})}
+ }
+ return {zones,coverage,unassigned,gaps,asOf:points.at(-1).time,currentOI:context.currentCoins*current,markPrice:current,period:context.period,historyClipped:context.historyClipped,error:null};
+}

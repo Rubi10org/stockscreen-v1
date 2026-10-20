@@ -154,13 +154,13 @@ class AnalysisTests(unittest.TestCase):
     def test_app_javascript_syntax(self):
         from pathlib import Path
         import json
-        app=Path('static/app.js').read_text().replace("import {align,strongestResistances} from './analysis.js';", '')
+        app=Path('static/app.js').read_text().replace("import {align,strongestResistances,oiLiquidationEstimates} from './analysis.js';", '')
         self.check_js('typeof new Function('+json.dumps(app)+') === "function"')
 
     def test_real_ohlc_and_volume_rendering(self):
         from pathlib import Path
         import json
-        app=Path('static/app.js').read_text().replace("import {align,strongestResistances} from './analysis.js';", '').split("$('live').onclick=")[0]
+        app=Path('static/app.js').read_text().replace("import {align,strongestResistances,oiLiquidationEstimates} from './analysis.js';", '').split("$('liquidation-mode').onchange=")[0]
         factory='new Function("document",'+json.dumps(app+';return {state,volumeBars,candleDetails};')+')'
         expression = """(function(){const ui=FACTORY({getElementById:()=>({value:'base'}),addEventListener:()=>{}});Object.assign(ui.state,{mode:'split',markets:[{symbol:'BTCUSDT',base:'BTC',quote:'USDT'}],series:[{symbol:'BTCUSDT'}],times:[0,1],view:[0,1],candles:[[{open:9,high:11,low:8,close:10,baseVolume:2,volume:20},{open:10,high:12,low:9,close:11,baseVolume:4,volume:44}]]});const bars=ui.volumeBars([0],500,0,1);return bars.includes('height="19"')&&bars.includes('height="38"')&&ui.candleDetails(0,0).includes('BTC')&&!bars.includes('NaN');})()"""
         self.check_js(expression.replace('FACTORY',factory))
@@ -215,6 +215,27 @@ class AnalysisTests(unittest.TestCase):
         app=Path('static/app.js').read_text()
         fn=app[app.index('function pannedRange('):app.index('function startPan(')]
         self.check_js('(function(){'+fn+'const a=pannedRange([20,40],101,50,100),b=pannedRange([20,40],101,-1000,100),c=pannedRange([0,100],101,50,100);return a[0]===10&&a[1]===30&&b[0]===80&&b[1]===100&&c[0]===0&&c[1]===100;})()')
+
+    def test_estimated_liquidations_are_explicit_relative_scenarios(self):
+        self.check_js("(function(){const p=Array.from({length:12},(_,i)=>({time:i,open:100,high:100.1,low:99.9,close:100,volume:1000,closed:true}));const zones=estimatedLiquidations(p);return zones.length===6&&zones.every(z=>z.kind==='estimated'&&z.notional===undefined&&z.intensity>0&&z.intensity<=1)&&(zones.filter(z=>z.side==='long').every(z=>z.high<100))&&(zones.filter(z=>z.side==='short').every(z=>z.low>100));})()")
+
+    def test_estimated_empty_and_zero_volume(self):
+        self.check_js("estimatedLiquidations([]).length===0&&estimatedLiquidations(Array.from({length:10},(_,i)=>({time:i,close:100,high:101,low:99,volume:0}))).length===0")
+
+    def test_vertical_pan_preserves_scale_and_moves_both_directions(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn=app[app.index('function pannedAxisRange('):app.index('function startPan(')]
+        self.check_js('(function(){'+fn+'const down=pannedAxisRange({min:100,max:200},50,100),up=pannedAxisRange({min:100,max:200},-50,100),percent=pannedAxisRange({min:-5,max:5},20,200);return down.min===150&&down.max===250&&up.min===50&&up.max===150&&percent.min===-4&&percent.max===6;})()')
+
+    def test_oi_model_does_not_invent_initial_positions_or_exceed_oi(self):
+        self.check_js("(function(){const c={step:1,period:'1h',currentCoins:120,markPrice:100,points:[{time:0,coins:100},{time:1,coins:110},{time:2,coins:120}],marks:[{time:0,low:99.9,high:100.1,close:100},{time:1,low:99.9,high:100.1,close:100},{time:2,low:99.9,high:100.1,close:100}]};const m=oiLiquidationEstimates(c);return m.zones.length>0&&Math.abs(m.coverage.long-20/120)<1e-9&&m.unassigned.long>=9999&&m.zones.every(z=>z.lowNotional<=z.estimatedNotional&&z.highNotional>=z.estimatedNotional)&&m.zones.filter(z=>z.side==='long').reduce((s,z)=>s+z.quantity,0)<=120;})()")
+
+    def test_no_oi_increase_produces_no_invented_zones(self):
+        self.check_js("(function(){const points=[0,1,2].map(time=>({time,coins:100})),marks=[0,1,2].map(time=>({time,low:99,high:101,close:100}));const m=oiLiquidationEstimates({step:1,currentCoins:100,markPrice:100,points,marks});return m.zones.length===0&&m.coverage.long===0&&m.unassigned.long===10000;})()")
+
+    def test_model_discards_crossed_long_thresholds(self):
+        self.check_js("(function(){const m=oiLiquidationEstimates({step:1,currentCoins:110,markPrice:100,points:[{time:0,coins:100},{time:1,coins:110},{time:2,coins:110}],marks:[{time:0,low:99,high:101,close:100},{time:1,low:99,high:101,close:100},{time:2,low:50,high:101,close:100}]});return m.zones.filter(z=>z.side==='long').length===0;})()")
 
     def test_alignment_uses_intersection(self):
         self.check_js("JSON.stringify(align([{points:[{time:1,close:2},{time:2,close:3}]},{points:[{time:2,close:4},{time:3,close:5}]}]))===JSON.stringify({times:[2],values:[[3],[4]]})")

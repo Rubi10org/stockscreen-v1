@@ -13,6 +13,7 @@ ROOT = Path(__file__).parent / 'static'
 BASE = 'https://data-api.binance.vision/api/v3/'
 BASES = (BASE, 'https://api.binance.com/api/v3/')
 LAST_SUCCESS = None
+LIQUIDATIONS = None
 INTERVALS = {'1m':60000, '5m':300000, '15m':900000, '1h':3600000, '4h':14400000, '1d':86400000}
 SYMBOLS = ('BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'FETUSDT', 'XRPUSDT')
 CACHE = {}
@@ -21,9 +22,10 @@ GATE = Lock()
 LAST_REQUEST = 0
 
 
-def upstream(endpoint, params=None, ttl=30):
+def upstream(endpoint, params=None, ttl=30, futures=False):
     global LAST_REQUEST, LAST_SUCCESS
-    url = BASE + endpoint + ('?' + urllib.parse.urlencode(params) if params else '')
+    root = 'https://fapi.binance.com/' if futures else BASE
+    url = root + endpoint + ('?' + urllib.parse.urlencode(params) if params else '')
     with LOCK:
         cached = CACHE.get(url)
         if cached and cached[0] > time.monotonic():
@@ -33,8 +35,8 @@ def upstream(endpoint, params=None, ttl=30):
         time.sleep(max(0, .22 - (time.monotonic() - LAST_REQUEST)))
         LAST_REQUEST = time.monotonic()
         failure = None
-        for base in BASES:
-            request = urllib.request.Request(url.replace(BASE, base, 1), headers={'User-Agent':'Stockscreen-local/1.0'})
+        for base in ((root,) if futures else BASES):
+            request = urllib.request.Request(url.replace(root, base, 1), headers={'User-Agent':'Stockscreen-local/1.0'})
             try:
                 with urllib.request.urlopen(request, timeout=15) as response:
                     result = json.load(response)
@@ -73,6 +75,50 @@ def read_series(symbol, interval, start, end, live=False):
     return {'symbol':symbol, 'points':rows}
 
 
+OI_PERIODS = {'5m':300000, '15m':900000, '1h':3600000, '4h':14400000, '1d':86400000}
+
+def open_interest_series(symbol, interval, start, end, include_marks=False):
+    now=int(time.time()*1000)
+    requested_start=start
+    start=max(start,now-29*86400000)
+    end=min(end,now)
+    desired=max(INTERVALS[interval],300000)
+    period=next((p for p,step in OI_PERIODS.items() if step>=desired and max(0,end-start)/step<=2000),'1d')
+    step=OI_PERIODS[period]
+    rows=[]
+    cursor=start
+    while cursor<end:
+        batch=upstream('futures/data/openInterestHist',{'symbol':symbol,'period':period,'startTime':cursor,'endTime':end,'limit':500},ttl=60,futures=True)
+        if not batch:
+            break
+        rows.extend({'time':int(r['timestamp']),'coins':float(r['sumOpenInterest']),'value':float(r['sumOpenInterestValue'])} for r in batch if start<=int(r['timestamp'])<=end)
+        next_cursor=int(batch[-1]['timestamp'])+step
+        if next_cursor<=cursor:
+            break
+        cursor=next_cursor
+        if len(batch)<500:
+            break
+    current=upstream('fapi/v1/openInterest',{'symbol':symbol},ttl=60,futures=True)
+    result={'symbol':symbol,'period':period,'step':step,'points':rows,'currentCoins':float(current['openInterest']),'currentTime':int(current['time']),'historyClipped':start>requested_start}
+    if include_marks:
+        premium=upstream('fapi/v1/premiumIndex',{'symbol':symbol},ttl=60,futures=True)
+        marks=[]
+        cursor=max(0,start-step)
+        while cursor<end:
+            batch=upstream('fapi/v1/markPriceKlines',{'symbol':symbol,'interval':period,'startTime':cursor,'endTime':end-1,'limit':500},ttl=60,futures=True)
+            if not batch:
+                break
+            marks.extend({'time':int(r[0])+step,'open':float(r[1]),'high':float(r[2]),'low':float(r[3]),'close':float(r[4])} for r in batch if int(r[0])+step<=end)
+            next_cursor=int(batch[-1][0])+step
+            if next_cursor<=cursor:
+                break
+            cursor=next_cursor
+            if len(batch)<500:
+                break
+        result.update(marks=marks,markPrice=float(premium['markPrice']),markTime=int(premium['time']))
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, data):
         body = json.dumps(data).encode()
@@ -89,6 +135,29 @@ class Handler(BaseHTTPRequestHandler):
                 query = urllib.parse.parse_qs(parsed.query)
                 if parsed.path == '/api/health':
                     self.send_json(200, {'service':'stockscreen', 'lastBinanceSuccess':LAST_SUCCESS, 'mode':'live-only'})
+                elif parsed.path == '/api/open-interest':
+                    symbols=list(dict.fromkeys(query.get('symbols',[''])[0].split(',')))
+                    interval=query.get('interval',['1h'])[0]
+                    start,end=int(query['start'][0]),int(query['end'][0])
+                    if not 1<=len(symbols)<=5 or any(s not in SYMBOLS for s in symbols) or interval not in INTERVALS or start<0 or end<=start:
+                        raise ValueError('Ungültige Open-Interest-Anfrage.')
+                    results=[]
+                    for symbol in symbols:
+                        try:
+                            results.append(open_interest_series(symbol,interval,start,end,query.get('model',['0'])[0]=='1'))
+                        except Exception as error:
+                            results.append({'symbol':symbol,'error':'Binance Futures Open Interest nicht verfügbar: '+str(error)[:180],'points':[]})
+                    self.send_json(200,results)
+                elif parsed.path == '/api/liquidations':
+                    symbols=query.get('symbols',[','.join(SYMBOLS)])[0].split(',')
+                    start=int(query.get('start',[int(time.time()*1000)-86400000])[0])
+                    end=int(query.get('end',[int(time.time()*1000)])[0])
+                    if any(symbol not in SYMBOLS for symbol in symbols) or not 0 <= end-start <= 7*86400000:
+                        raise ValueError('Liquidationszeitraum: maximal 7 Tage, nur unterstützte Märkte.')
+                    if LIQUIDATIONS is None:
+                        self.send_json(503,{'error':'Liquidationsdienst nicht gestartet. Server neu starten.'})
+                    else:
+                        self.send_json(200,LIQUIDATIONS.query(symbols,start,end))
                 elif parsed.path == '/api/markets':
                     exchange = upstream('exchangeInfo', {'symbols':json.dumps(SYMBOLS, separators=(',', ':'))}, ttl=3600)
                     markets = [{'symbol':s['symbol'], 'base':s['baseAsset'], 'quote':s['quoteAsset']} for s in exchange['symbols'] if s['symbol'] in SYMBOLS and s['status']=='TRADING' and s.get('isSpotTradingAllowed', False)]
@@ -147,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global LIQUIDATIONS
     import argparse
     import sys
     parser = argparse.ArgumentParser()
@@ -176,6 +246,11 @@ def main():
     except OSError as error:
         print('Der lokale Server konnte nicht starten: '+str(error),file=sys.stderr)
         return 1
+    from liquidations import Collector
+    data_dir=Path(__file__).parent/'data'
+    data_dir.mkdir(exist_ok=True)
+    LIQUIDATIONS=Collector(data_dir/'liquidations.sqlite3')
+    LIQUIDATIONS.start()
     address='http://127.0.0.1:%s' % args.port
     print('Stockscreen läuft auf '+address+' · Beenden mit Ctrl+C',flush=True)
     if args.open:
@@ -187,6 +262,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if LIQUIDATIONS:
+            LIQUIDATIONS.stop.set()
         httpd.server_close()
     return 0
 

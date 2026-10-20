@@ -8,3 +8,6 @@ venv/
 .env.*
 !.env.example
 *.log
+
+# Local observed market events
+data/
