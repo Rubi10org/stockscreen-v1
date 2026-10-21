@@ -1,5 +1,9 @@
 """Local-only Stockscreen server. Python standard library, no account or packages."""
 import json
+import io
+import math
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -14,32 +18,73 @@ BASE = 'https://data-api.binance.vision/api/v3/'
 BASES = (BASE, 'https://api.binance.com/api/v3/')
 LAST_SUCCESS = None
 LIQUIDATIONS = None
+from kronos_service import KronosJobs, installation_status
+from research_journal import record_forecast, record_observations
+KRONOS = KronosJobs(journal=record_forecast)
 INTERVALS = {'1m':60000, '5m':300000, '15m':900000, '1h':3600000, '4h':14400000, '1d':86400000}
 SYMBOLS = ('BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'FETUSDT', 'XRPUSDT')
 CACHE = {}
 LOCK = Lock()
 GATE = Lock()
+BITVAVO_GATE = Lock()
+FUTURES_GATE = Lock()
 LAST_REQUEST = 0
+LAST_REQUESTS = {}
+CAPABILITIES = ['binance', 'bitvavo']
 
 
-def upstream(endpoint, params=None, ttl=30, futures=False):
+def bitvavo_json(url):
+    """Use the OS HTTPS client, with bounded DNS/connect/transfer times."""
+    curl = shutil.which('curl')
+    if not curl:
+        raise urllib.error.URLError('curl fehlt. Für öffentliche Bitvavo-Daten wird curl benötigt.')
+    try:
+        response = subprocess.run([curl, '--silent', '--show-error', '--connect-timeout', '5',
+            '--max-time', '12', '--proto', '=https', '--write-out', '\n%{http_code}',
+            '--user-agent', 'Stockscreen-local/1.0', url], capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError('Bitvavo-Verbindungstest über curl überschreitet 15 Sekunden.') from error
+    if response.returncode:
+        raise urllib.error.URLError('curl: '+response.stderr.decode('utf-8',errors='replace')[:400])
+    try:
+        body, code = response.stdout.rsplit(b'\n',1)
+        status = int(code)
+    except ValueError as error:
+        raise ValueError('Ungültige HTTP-Antwort von Bitvavo.') from error
+    if status >= 400:
+        raise urllib.error.HTTPError(url,status,'Bitvavo HTTP error',{},io.BytesIO(body))
+    if status != 200:
+        raise urllib.error.URLError('Unerwarteter Bitvavo-HTTP-Status '+str(status))
+    return json.loads(body)
+
+
+def upstream(endpoint, params=None, ttl=30, futures=False, source="binance"):
     global LAST_REQUEST, LAST_SUCCESS
-    root = 'https://fapi.binance.com/' if futures else BASE
+    root = 'https://api.bitvavo.com/v2/' if source == 'bitvavo' else ('https://fapi.binance.com/' if futures else BASE)
     url = root + endpoint + ('?' + urllib.parse.urlencode(params) if params else '')
     with LOCK:
         cached = CACHE.get(url)
         if cached and cached[0] > time.monotonic():
             return cached[1]
     # Shared pacing also applies across browser tabs. Never retry rate-limit errors.
-    with GATE:
-        time.sleep(max(0, .22 - (time.monotonic() - LAST_REQUEST)))
+    gate = BITVAVO_GATE if source == 'bitvavo' else FUTURES_GATE if futures else GATE
+    with gate:
+        with LOCK:
+            cached = CACHE.get(url)
+            if cached and cached[0] > time.monotonic():
+                return cached[1]
+        time.sleep(max(0, .22 - (time.monotonic() - LAST_REQUESTS.get(root, 0))))
         LAST_REQUEST = time.monotonic()
+        LAST_REQUESTS[root] = LAST_REQUEST
         failure = None
-        for base in ((root,) if futures else BASES):
+        for base in ((root,) if futures or source == "bitvavo" else BASES):
             request = urllib.request.Request(url.replace(root, base, 1), headers={'User-Agent':'Stockscreen-local/1.0'})
             try:
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    result = json.load(response)
+                if source == 'bitvavo':
+                    result = bitvavo_json(request.full_url)
+                else:
+                    with urllib.request.urlopen(request, timeout=15) as response:
+                        result = json.load(response)
                 LAST_SUCCESS = int(time.time()*1000)
                 break
             except urllib.error.HTTPError:
@@ -73,6 +118,37 @@ def read_series(symbol, interval, start, end, live=False):
         if len(batch) < 1000:
             break
     return {'symbol':symbol, 'points':rows}
+
+
+def bitvavo_markets():
+    rows = upstream('markets', ttl=3600, source='bitvavo')
+    return [{'symbol':s, 'market':m['market'], 'base':m['base'], 'quote':m['quote']}
+            for m in rows for s in SYMBOLS
+            if m['market'] == s.removesuffix('USDT')+'-EUR' and m.get('status') == 'trading']
+
+
+def bitvavo_series(symbol, interval, start, end, live=False):
+    step = INTERVALS[interval]
+    market = symbol.removesuffix('USDT')+'-EUR'
+    now = int(time.time()*1000)
+    cursor = start//step*step
+    points = {}
+    # Request bounded windows: Bitvavo returns newest first and omits empty intervals.
+    while cursor < min(end, now):
+        stop = min(cursor+1000*step, ((min(end,now)+step-1)//step)*step)
+        batch = upstream(market+'/candles', {'interval':interval, 'start':cursor,
+                         'end':stop, 'limit':1440}, ttl=10 if live else 300, source='bitvavo')
+        for r in batch:
+            opened = int(r[0])
+            closed = opened+step <= now
+            if cursor <= opened < stop and opened >= start and (opened+step <= min(end,now) or (live and opened < min(end,now))):
+                # Candles expose base volume only; no invented exact EUR turnover.
+                points[opened] = {'time':opened+step, 'open':float(r[1]), 'high':float(r[2]),
+                    'low':float(r[3]), 'close':float(r[4]), 'baseVolume':float(r[5]),
+                    'volume':float(r[5])*float(r[4]), 'quoteVolumeEstimated':True, 'closed':closed}
+        cursor = stop
+    return {'symbol':symbol, 'market':market, 'source':'bitvavo', 'quote':'EUR',
+            'points':[points[t] for t in sorted(points)]}
 
 
 OI_PERIODS = {'5m':300000, '15m':900000, '1h':3600000, '4h':14400000, '1d':86400000}
@@ -133,8 +209,34 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith('/api/'):
             try:
                 query = urllib.parse.parse_qs(parsed.query)
+                source = query.get('source',['binance'])[0]
+                if source not in ('binance','bitvavo'):
+                    raise ValueError('Unbekannte Datenquelle.')
                 if parsed.path == '/api/health':
-                    self.send_json(200, {'service':'stockscreen', 'lastBinanceSuccess':LAST_SUCCESS, 'mode':'live-only'})
+                    self.send_json(200, {'service':'stockscreen', 'lastBinanceSuccess':LAST_SUCCESS, 'mode':'live-only', 'sources':CAPABILITIES, 'version':'bitvavo-2'})
+                elif parsed.path == '/api/research/status':
+                    from research_status import research_status
+                    self.send_json(200,research_status())
+                elif parsed.path == '/api/kronos/status':
+                    job=query.get('job',[''])[0]
+                    self.send_json(200,KRONOS.get(job) if job else installation_status())
+                elif parsed.path == '/api/kronos/cancel':
+                    self.send_json(200,KRONOS.cancel(query.get('job',[''])[0]))
+                elif parsed.path == '/api/kronos/forecast':
+                    from bitvavo_kronos import cached_history
+                    self.send_json(200,KRONOS.start(query.get('symbol',['BTCUSDT'])[0],lambda *args:cached_history(bitvavo_series,*args)))
+                elif parsed.path == '/api/price':
+                    symbol=query.get('symbol',[''])[0]
+                    if source != 'bitvavo' or symbol not in SYMBOLS:
+                        raise ValueError('Preisabruf: gültigen Bitvavo-Markt wählen.')
+                    market=symbol.removesuffix('USDT')+'-EUR'
+                    ticker=upstream('ticker/price',{'market':market},ttl=5,source='bitvavo')
+                    if isinstance(ticker,list):
+                        ticker=next((row for row in ticker if row.get('market')==market),{})
+                    price=float(ticker['price'])
+                    if not math.isfinite(price) or price<=0 or ticker.get('market')!=market:
+                        raise ValueError('Ungültiger Bitvavo-Ticker.')
+                    self.send_json(200,{'symbol':symbol,'market':market,'source':'bitvavo','quote':'EUR','price':price,'retrievedAt':int(time.time()*1000)})
                 elif parsed.path == '/api/open-interest':
                     symbols=list(dict.fromkeys(query.get('symbols',[''])[0].split(',')))
                     interval=query.get('interval',['1h'])[0]
@@ -159,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self.send_json(200,LIQUIDATIONS.query(symbols,start,end))
                 elif parsed.path == '/api/markets':
+                    if source == 'bitvavo':
+                        self.send_json(200, bitvavo_markets())
+                        return
                     exchange = upstream('exchangeInfo', {'symbols':json.dumps(SYMBOLS, separators=(',', ':'))}, ttl=3600)
                     markets = [{'symbol':s['symbol'], 'base':s['baseAsset'], 'quote':s['quoteAsset']} for s in exchange['symbols'] if s['symbol'] in SYMBOLS and s['status']=='TRADING' and s.get('isSpotTradingAllowed', False)]
                     self.send_json(200, markets)
@@ -172,7 +277,11 @@ class Handler(BaseHTTPRequestHandler):
                     if start < 0 or end <= start or (end-start)/INTERVALS[interval] > 5000:
                         raise ValueError('Zeitraum ungültig oder länger als 5.000 Kerzen. Bitte Intervall vergrößern.')
                     with ThreadPoolExecutor(max_workers=3) as pool:
-                        data = list(pool.map(lambda s: read_series(s, interval, start, end, live), symbols))
+                        reader = bitvavo_series if source == 'bitvavo' else read_series
+                        data = list(pool.map(lambda s: reader(s, interval, start, end, live), symbols))
+                    if source == 'bitvavo':
+                        try:record_observations(data)
+                        except Exception:pass
                     self.send_json(200, data)
                 else:
                     self.send_json(404, {'error':'Unbekannter Endpunkt.'})
@@ -181,7 +290,7 @@ class Handler(BaseHTTPRequestHandler):
             except urllib.error.HTTPError as error:
                 try:
                     detail = json.loads(error.read(4096).decode('utf-8'))
-                    reason = str(detail.get('msg', ''))[:500]
+                    reason = str(detail.get('msg', detail.get('error', '')))[:500]
                     code = detail.get('code')
                 except (ValueError, UnicodeError, AttributeError):
                     reason, code = '', None
@@ -193,15 +302,19 @@ class Handler(BaseHTTPRequestHandler):
                     message = 'Binance ist für diesen Standort nicht verfügbar (HTTP 451).'
                 else:
                     message = 'Binance-Abruf fehlgeschlagen (HTTP %s).' % error.code
+                if source == 'bitvavo':
+                    message = 'Bitvavo-Abruf fehlgeschlagen (HTTP %s).' % error.code
                 if reason:
-                    message += ' Binance: '+reason
+                    message += ' Anbieter: '+reason
                 self.send_json(502, {'error':message, 'binanceCode':code})
+            except TimeoutError:
+                self.send_json(504, {'error':('Bitvavo' if source == 'bitvavo' else 'Binance')+' antwortet nicht rechtzeitig. Verbindung zur Börse prüfen; es werden keine Ersatzdaten angezeigt.'})
             except urllib.error.URLError as error:
                 reason = str(error.reason)
                 stage = 'DNS-Auflösung' if any(t in reason.lower() for t in ('name', 'nodename', 'resolution')) else 'TLS-Zertifikatsprüfung' if 'CERTIFICATE' in reason else 'Netzwerkverbindung'
-                self.send_json(502, {'error':'Binance-Abruf fehlgeschlagen: '+stage+'. Bitte die Verbindung des Rechners prüfen. Keine Ersatzdaten.'})
+                self.send_json(502, {'error':('Bitvavo' if source == 'bitvavo' else 'Binance')+'-Abruf fehlgeschlagen: '+stage+'. Bitte die Verbindung des Rechners prüfen. Keine Ersatzdaten.'})
             except Exception:
-                self.send_json(502, {'error':'Binance konnte vom lokalen Datenserver nicht erreicht werden. Internet/DNS/TLS-Verbindung prüfen. Es werden keine Ersatzdaten angezeigt.'})
+                self.send_json(502, {'error':('Bitvavo' if source == 'bitvavo' else 'Binance')+' konnte vom lokalen Datenserver nicht erreicht werden. Internet/DNS/TLS-Verbindung prüfen. Es werden keine Ersatzdaten angezeigt.'})
             return
         route = '/index.html' if parsed.path == '/' else parsed.path
         path = (ROOT / route.lstrip('/')).resolve()
@@ -210,9 +323,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = path.read_bytes()
         self.send_response(200)
+        self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Type', {'.html':'text/html; charset=utf-8','.css':'text/css','.js':'text/javascript','.json':'application/json'}.get(path.suffix,'application/octet-stream'))
         self.end_headers()
         self.wfile.write(body)
+
+
+def check_bitvavo():
+    """Standalone diagnostic: no local server or Binance service involved."""
+    print('1/3 Bitvavo-Marktliste: https://api.bitvavo.com/v2/markets', flush=True)
+    try:
+        markets = bitvavo_markets()
+        print('Aktive EUR-Paare: '+', '.join(m['market'] for m in markets), flush=True)
+        now = int(time.time()*1000)
+        for i, symbol in enumerate(('BTCUSDT', 'FETUSDT'), 2):
+            market = symbol.removesuffix('USDT')+'-EUR'
+            if not any(m['symbol']==symbol for m in markets):
+                raise ValueError(market+': nicht als aktiver Markt gemeldet')
+            print(str(i)+'/3 '+market+': letzte 6 Stunden laden …', flush=True)
+            series = bitvavo_series(symbol,'1h',now//3600000*3600000-6*3600000,now,True)
+            if not series['points']:
+                raise ValueError(market+': keine Kerzen erhalten')
+            print(market+': '+str(len(series['points']))+' echte Kerzen empfangen', flush=True)
+        print('BITVAVO-CHECK ERFOLGREICH', flush=True)
+        return 0
+    except urllib.error.HTTPError as error:
+        print('BITVAVO-CHECK FEHLGESCHLAGEN: HTTP '+str(error.code)+' '+error.read(2048).decode('utf-8',errors='replace'), flush=True)
+    except Exception as error:
+        print('BITVAVO-CHECK FEHLGESCHLAGEN: '+type(error).__name__+': '+str(error), flush=True)
+    return 1
 
 
 def main():
@@ -223,7 +362,10 @@ def main():
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--open', action='store_true', help='Browser nach erfolgreichem Serverstart öffnen')
     parser.add_argument('--check', action='store_true', help='Echte Binance-Abrufe für alle fünf Märkte prüfen')
+    parser.add_argument('--check-bitvavo', action='store_true', help='Bitvavo-Marktliste und BTC/FET-Kerzen direkt prüfen')
     args = parser.parse_args()
+    if args.check_bitvavo:
+        return check_bitvavo()
     if args.check:
         try:
             exchange=upstream('exchangeInfo', {'symbols':json.dumps(SYMBOLS, separators=(',', ':'))}, ttl=0)

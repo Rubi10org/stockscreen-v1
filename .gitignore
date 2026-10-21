@@ -11,3 +11,7 @@ venv/
 
 # Local observed market events
 data/
+
+# Local Kronos runtime, weights, bootstrap and source checkout
+.kronos-*/
+vendor/Kronos/

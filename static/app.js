@@ -5,7 +5,7 @@ const steps={'1m':60000,'5m':300000,'15m':900000,'1h':3600000,'4h':14400000,'1d'
 const SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','FETUSDT','XRPUSDT'];
 const coinColor=s=>colors[Math.max(0,SYMBOLS.indexOf(s))];
 const assetName=s=>s==='FETUSDT'?'Fetch.ai (FET)':s.replace('USDT','');
-const state={markets:[],selected:['BTCUSDT','FETUSDT'],series:[],times:[],values:[],mode:'split',dragMode:'pan',panDragging:false,axisRanges:{},chartViews:{},syncZoom:false,syncAxis:{},activeChart:null,middleZoomKey:null,expandedChart:null,chartHeights:{},resizingChart:false,expandedFromFullscreen:false,resistanceSelection:null,oiEnabled:true,oiData:[],oiRevision:0,oiFetchedAt:0,liquidationMode:'off',liquidationZones:[],liquidationBusy:false,liquidationRevision:0,liquidationStatus:null,modelSummaries:[],axisDragging:false,measurement:null,candles:[],view:null,cursor:null,pinned:false,hits:[],revision:0,busy:false,dirty:false,scanned:false,failures:0,lastSuccess:0,rollingMs:7*86400000,loadedSymbols:[],loadedStart:0,interval:'1h'};
+const state={source:'bitvavo',markets:[],selected:['BTCUSDT','FETUSDT'],series:[],times:[],values:[],mode:'split',dragMode:'pan',panDragging:false,axisRanges:{},chartViews:{},syncZoom:false,syncAxis:{},activeChart:null,middleZoomKey:null,expandedChart:null,chartHeights:{},resizingChart:false,expandedFromFullscreen:false,resistanceSelection:null,oiEnabled:true,oiData:[],oiRevision:0,oiFetchedAt:0,liquidationMode:'off',liquidationZones:[],liquidationBusy:false,liquidationRevision:0,liquidationStatus:null,modelSummaries:[],axisDragging:false,measurement:null,candles:[],view:null,cursor:null,pinned:false,hits:[],revision:0,busy:false,dirty:false,scanned:false,failures:0,lastSuccess:0,rollingMs:7*86400000,loadedSymbols:[],loadedStart:0,interval:'1h'};
 const pct=n=>`${n>=0?'+':''}${n.toFixed(2)} %`;
 const priceFormat=new Intl.NumberFormat('de-DE',{maximumFractionDigits:2}),smallPriceFormat=new Intl.NumberFormat('de-DE',{maximumFractionDigits:6});
 const money=n=>(Math.abs(n)<1?smallPriceFormat:priceFormat).format(n);
@@ -14,15 +14,28 @@ const axisDateFormat=new Intl.DateTimeFormat('de-DE',{timeZone:'UTC',day:'2-digi
 const date=t=>dateFormat.format(t)+' UTC';
 const localInput=t=>new Date(t).toISOString().slice(0,16);
 const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function notice(message){$('notice').textContent=message;$('notice').hidden=!message}
+function notice(message){$('notice').textContent=message;$('notice').hidden=!message;$('try-binance').hidden=!(message&&state.source==='bitvavo'&&/antwortet nicht|Zeitüberschreitung|Abruf fehlgeschlagen|nicht erreicht|nicht erreichbar/i.test(message))}
 function resetScan(){$('chart-resistances').textContent='Widerstände anzeigen';$('chart-resistances').setAttribute('aria-pressed','false');state.hits=[];state.scanned=false;state.resistanceSelection=null;$('pair-summary').innerHTML='';$('scan-results').innerHTML='';$('scan-summary').innerHTML='<span class="muted">Bereit: Widerstandszonen der geladenen Märkte untersuchen.</span>'}
 async function proxyApi(path){
- const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),90000);
- try{const r=await fetch(path,{signal:controller.signal,cache:'no-store'});let d;try{d=await r.json()}catch{throw Error('Der lokale Datenserver liefert keine gültige Antwort. Bitte Start.command erneut starten.')}if(!r.ok)throw Error(d.error||'Binance-Abruf fehlgeschlagen.');return d}
- catch(e){if(e instanceof TypeError)throw Error('Der lokale Datenserver ist nicht erreichbar. Bitte Start.command im Projektordner starten und http://127.0.0.1:8765 öffnen.');throw e}
+ const controller=new AbortController(),timeout=path.startsWith('/api/health')?5000:path.startsWith('/api/markets')?20000:60000,timer=setTimeout(()=>controller.abort(),timeout);
+ try{const r=await fetch(path,{signal:controller.signal,cache:'no-store'});let d;try{d=await r.json()}catch{throw Error('Der lokale Datenserver liefert keine gültige Antwort. Bitte Start.command erneut starten.')}if(!r.ok)throw Error(d.error||'Marktdaten-Abruf fehlgeschlagen.');return d}
+ catch(e){if(e.name==='AbortError'){const phase=path.startsWith('/api/health')?'Lokaler Server antwortet nicht. Bitte den Server im Terminal neu starten.':path.startsWith('/api/markets')?venue()+'-Marktliste antwortet nicht innerhalb von 20 Sekunden. Verbindung zur Börse prüfen.':path.startsWith('/api/history')?venue()+'-Kerzen konnten nicht innerhalb von 60 Sekunden geladen werden.': 'Zusatzdaten (Open Interest/Liquidationen) antworten nicht innerhalb von 60 Sekunden.';throw Error(phase)}if(e instanceof TypeError)throw Error('Der lokale Datenserver ist nicht erreichbar. Bitte Start.command im Projektordner starten und http://127.0.0.1:8765 öffnen.');throw e}
  finally{clearTimeout(timer)}
 }
-async function api(path){return proxyApi(path)}
+async function api(path){return proxyApi(path+(path.includes('?')?'&':'?')+'source='+state.source)}
+const venue=()=>state.source==='bitvavo'?'Bitvavo':'Binance';
+const quote=()=>state.source==='bitvavo'?'EUR':'USDT';
+const displaySymbol=s=>state.source==='bitvavo'?s.replace('USDT','-EUR'):s;
+function sourceControls(){
+ $('source-label').innerHTML=venue()+' Spot<small>'+(state.source==='bitvavo'?'Öffentliche EUR-Marktdaten · kein Kontozugriff':'Echte Binance-Daten · lokaler Datenserver')+'</small>';
+ $('liquidation-mode').disabled=state.source==='bitvavo';
+ $('liquidation-chart-status').textContent=state.source==='bitvavo'?'Binance-Liquidationszonen nur in der Binance-USDT-Ansicht · keine Übertragung auf EUR-Preise':'';
+ $('liquidation-mode').title=state.source==='bitvavo'?'Binance-USDT-Preiszonen nur in der Binance-Ansicht verfügbar':'';
+ $('volume-unit').value=state.source==='bitvavo'?'base':'quote';
+ $('volume-unit').options[0].textContent=state.source==='bitvavo'?'EUR-Umsatz ≈ (Volumen × Schlusskurs)':'Gegenwährung';
+ $('volume-note').textContent=state.source==='bitvavo'?'EUR-Umsatz nur Näherung · keine exakte Handelssumme':'Getrennte Volumenskala je Markt';
+}
+
 function setDates(days){const end=$('auto-live').checked?Math.floor(Date.now()/60000)*60000:Math.floor(Date.now()/steps[$('interval').value])*steps[$('interval').value];state.rollingMs=days*86400000;$('end').value=localInput(end);$('start').value=localInput(end-days*86400000);document.querySelectorAll('[data-days]').forEach(b=>b.classList.toggle('active',Number(b.dataset.days)===days))}
 function renderSelected(){
  $('selected').innerHTML=state.selected.map((s,i)=>`<span class="chip"><i class="dot" style="background:${coinColor(s)}"></i>${escape(assetName(s))}<button data-remove="${escape(s)}" aria-label="${escape(s)} entfernen">×</button></span>`).join('');
@@ -40,14 +53,14 @@ function search(){
 async function connect(){
  if(state.busy)return;
  state.busy=true;$('live').disabled=true;setLoading(true);
- $('connection').textContent='○ Binance wird verbunden';
- try{const markets=await api('/api/markets');state.markets=markets.filter(m=>SYMBOLS.includes(m.symbol));$('connection').textContent=`● Binance verbunden · ${markets.length} Märkte`;notice('');clearData();state.dirty=false;$('auto-live').checked=true;$('end').disabled=true;setDates(7);}
- catch(e){$('data-badge').textContent=state.series.length?'ALTE DATEN':'KEINE DATEN';state.dirty=true;$('refresh-status').textContent='Offline · keine Aktualisierung';$('connection').textContent='○ Binance offline';notice(e.message);}
- finally{state.busy=false;$('live').disabled=false;setLoading(false)}
+ $('connection').textContent='○ Lokaler Server wird geprüft';$('refresh-status').textContent='Serverversion prüfen …';
+ try{sourceControls();const health=await proxyApi('/api/health');if(!health.sources?.includes(state.source))throw Error('Es läuft noch eine ältere Serverversion. Server im Terminal mit Ctrl+C stoppen und python3 server.py --open neu starten.');$('connection').textContent='○ '+venue()+' wird verbunden';$('refresh-status').textContent=venue()+'-Marktliste laden …';const markets=await api('/api/markets');if(!Array.isArray(markets)||!markets.length)throw Error('Keine unterstützten aktiven Märkte bei '+venue()+' verfügbar.');state.markets=markets.filter(m=>SYMBOLS.includes(m.symbol));state.selected=state.selected.filter(s=>state.markets.some(m=>m.symbol===s));renderSelected();$('connection').textContent=`● ${venue()} verbunden · ${markets.length} Märkte`;notice('');clearData();state.dirty=false;$('auto-live').checked=true;$('end').disabled=true;setDates(7);}
+ catch(e){$('data-badge').textContent=state.series.length?'ALTE DATEN':'KEINE DATEN';state.dirty=true;$('refresh-status').textContent='Offline · keine Aktualisierung';$('connection').textContent='○ '+venue()+' offline';notice(e.message);}
+ finally{state.busy=false;$('exchange-source').disabled=false;$('live').disabled=false;setLoading(false)}
  if(!state.dirty)await load();
 }
 function clearData(){state.measurement=null;$('measurement').hidden=true;state.series=[];state.times=[];state.values=[];state.view=null;state.cursor=null;state.pinned=false;$('data-badge').textContent='KEINE DATEN';$('data-badge').classList.remove('stale');$('asset-cards').innerHTML='';$('asset-cards')._markup=null;$('chart-area').innerHTML='<div class="empty"><span class="empty-icon">⌁</span><h3>Dein Vergleich beginnt hier.</h3><p>Wähle Märkte und lade einen Zeitraum.</p></div>';$('coverage').textContent='';resetScan()}
-function setLoading(loading){$('load').disabled=loading;$('load').textContent=loading?'Daten werden geladen …':'Vergleich laden ↗';$('scan').disabled=loading||state.series.length<1;$('market-search').disabled=loading;$('browse').disabled=loading;}
+function setLoading(loading){$('exchange-source').disabled=loading;$('load').disabled=loading;$('load').textContent=loading?'Daten werden geladen …':'Vergleich laden ↗';$('scan').disabled=loading||state.series.length<1;$('market-search').disabled=loading;$('browse').disabled=loading;}
 async function load(refresh=false){
  if(state.busy)return;
  const following=$('auto-live').checked;
@@ -57,7 +70,7 @@ async function load(refresh=false){
  if(state.selected.length<1){notice('Bitte mindestens einen Markt auswählen.');return}
  if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start||end>Date.now()+60000){notice('Bitte einen gültigen Zeitraum in der Vergangenheit wählen.');return}
  if((end-start)/steps[interval]>5000){notice('Dieser Zeitraum enthält mehr als 5.000 Kerzen. Bitte ein größeres Intervall oder einen kürzeren Zeitraum wählen.');return}
- state.busy=true;setLoading(true);$('live').disabled=true;notice('');
+ state.busy=true;setLoading(true);$('live').disabled=true;notice('');$('refresh-status').textContent=venue()+'-Kerzen laden …';
  try{
  const series=await api('/api/history?'+new URLSearchParams({symbols:state.selected.join(','),interval,start,end,live:following?'1':'0'}));
  const aligned=align(series);
@@ -65,21 +78,21 @@ async function load(refresh=false){
  if(!refresh){state.measurement=null;state.axisRanges={};state.chartViews={};state.syncAxis={};}state.liquidationRevision++;state.liquidationZones=[];state.series=series;state.times=aligned.times;state.values=aligned.values;state.candles=series.map(s=>{const map=new Map(s.points.map(p=>[p.time,p]));return aligned.times.map(t=>map.get(t))});state.interval=interval;state.view=[0,state.times.length-1];state.cursor=null;state.pinned=false;state.dirty=false;state.failures=0;state.lastSuccess=Date.now();state.loadedSymbols=series.map(s=>s.symbol);state.loadedStart=start;state.rollingMs=end-start;
  if(refresh&&oldView&&oldView[1]<state.times.at(-2)){state.view=oldView.map(nearestTime);if(state.view[0]>=state.view[1])state.view=[0,state.times.length-1]}if(refresh&&oldPinned&&oldCursor>=state.times[0]&&oldCursor<=state.times.at(-1)){state.cursor=nearestTime(oldCursor);state.pinned=true}
  $('refresh-status').textContent=(following?'Live · ':'Geladen · ')+new Date().toLocaleTimeString('de-DE')+(following?' · 15s Aktualisierung':'');
- $('connection').textContent=following?'● Binance LIVE · 15s':'● Binance · Historie';
- $('data-badge').textContent=following?'BINANCE · LIVE 15s':'BINANCE · HISTORISCH';
+ $('connection').textContent=following?'● '+venue()+' LIVE · 15s':'● '+venue()+' · Historie';
+ $('data-badge').textContent=venue().toUpperCase()+(following?' · LIVE 15s':' · HISTORISCH');
  $('chart-subtitle').textContent=`${date(state.times[0])} — ${date(state.times.at(-1))} · ${interval}-Kerzen`;
  $('coverage').textContent=`${state.times.length.toLocaleString('de-DE')} gemeinsame Kerzen · alle Zeiten UTC`;
  if(series.some(s=>s.points.length!==state.times.length))notice('Nur gemeinsame Kerzen aller Märkte werden verglichen. Datenlücken werden nicht aufgefüllt.');
- const volumeChoice=$('volume-market').value;$('volume-market').innerHTML=series.map((s,i)=>`<option value="${i}">${escape(s.symbol)}</option>`).join('');if(refresh&&volumeChoice)$('volume-market').value=volumeChoice;resetScan();renderCharts();renderCards();if(hadScan)runScan(false);if(state.liquidationMode!=='off')refreshLiquidations();if(state.oiEnabled)refreshOpenInterest(!refresh);
+ const volumeChoice=$('volume-market').value;$('volume-market').innerHTML=series.map((s,i)=>`<option value="${i}">${escape(displaySymbol(s.symbol))}</option>`).join('');if(refresh&&volumeChoice)$('volume-market').value=volumeChoice;resetScan();renderCharts();renderCards();if(hadScan)runScan(false);if(state.liquidationMode!=='off')refreshLiquidations();if(state.oiEnabled)refreshOpenInterest(!refresh);
  }catch(e){$('data-badge').textContent=state.series.length?'ALTE DATEN':'KEINE DATEN';state.failures++;$('connection').textContent='○ Verbindung unterbrochen · alte Daten';$('refresh-status').textContent='Datenstand unverändert · Abruf fehlgeschlagen';if(state.failures>=3||/limit|begrenzt/i.test(e.message)){$('auto-live').checked=false;$('end').disabled=false;$('refresh-status').textContent='Live wegen Abruffehlern pausiert · erneut verbinden';}notice(e.name==='AbortError'?'Zeitüberschreitung. Bitte kürzeren Zeitraum wählen oder erneut versuchen.':e.message)}
  finally{state.busy=false;setLoading(false);$('live').disabled=false}
 }
 function marketInfo(symbol){return state.markets.find(m=>m.symbol===symbol)||{base:symbol,quote:''}}
-function candleDetails(k,i){const p=state.candles[k][i],m=marketInfo(state.series[k].symbol);return `<div class="ohlc"><span class="candle-status ${p.closed===false?'forming':'closed'}">${p.closed===false?'Laufende Kerze · vorläufig':'Abgeschlossene Kerze'}</span>O ${money(p.open)} · H ${money(p.high)}<br>L ${money(p.low)} · C ${money(p.close)}</div><div class="volume-readout">Vol ${money(p.baseVolume)} ${escape(m.base)}<br>Umsatz ${money(p.volume)} ${escape(m.quote)}</div>`}
+function candleDetails(k,i){const p=state.candles[k][i],m=marketInfo(state.series[k].symbol);return `<div class="candle-time">Kerzenschluss: ${date(p.time??state.times[i])}</div><div class="ohlc"><span class="candle-status ${p.closed===false?'forming':'closed'}">${p.closed===false?'Laufende Kerze · vorläufig':'Abgeschlossene Kerze'}</span>O ${money(p.open)} · H ${money(p.high)}<br>L ${money(p.low)} · C ${money(p.close)}</div><div class="volume-readout">Vol ${money(p.baseVolume)} ${escape(m.base)}<br>Umsatz ${p.quoteVolumeEstimated?'≈ ':''}${money(p.volume)} ${escape(m.quote)}</div>`}
 function volumeBars(group,w,a,b){
  const k=state.mode==='overlay'?Number($('volume-market').value||0):group[0],base=$('volume-unit').value==='base',field=base?'baseVolume':'volume',points=state.candles[k].slice(a,b+1);
  const max=Math.max(...points.map(p=>p[field]),0),bw=Math.max(.5,Math.min(12,(w-87)/(b-a+1)*.65)),m=marketInfo(state.series[k].symbol);
- let out=`<line x1="14" x2="${w-73}" y1="222" y2="222" stroke="#26303d"/><text x="14" y="237">Vol ${escape(state.series[k].symbol)} · ${escape(base?m.base:m.quote)}</text><text x="${w-63}" y="249">${max>=1e6?(max/1e6).toFixed(1)+'M':max>=1000?(max/1000).toFixed(1)+'K':money(max)}</text>`;
+ let out=`<line x1="14" x2="${w-73}" y1="222" y2="222" stroke="#26303d"/><text x="14" y="237">Vol ${escape(displaySymbol(state.series[k].symbol))} · ${escape(base?m.base:m.quote)}</text><text x="${w-63}" y="249">${max>=1e6?(max/1e6).toFixed(1)+'M':max>=1000?(max/1000).toFixed(1)+'K':money(max)}</text>`;
  for(let i=a;i<=b;i++){const p=state.candles[k][i],h=max?p[field]/max*38:0;out+=`<rect x="${xFor(i,w,[a,b])-bw/2}" y="${282-h}" width="${bw}" height="${h}" fill="${p.close>=p.open?'#7fdfb8':'#f48b9c'}" opacity=".55"/>`}
  return out;
 }
@@ -88,7 +101,7 @@ function scheduleCursorRender(){if(cursorFrame!==null)return;cursorFrame=request
 function scheduleChartRender(){if(chartFrame!==null)return;chartFrame=requestAnimationFrame(()=>{chartFrame=null;renderCharts()})}
 function renderCards(){
  const i=state.cursor??state.view[1],base=state.view[0];
- const cardsMarkup=state.series.map((s,k)=>{if(state.expandedChart&&state.mode==='split'&&s.symbol!==state.expandedChart)return '';const localView=chartView(state.mode==='split'?s.symbol:'overlay'),index=state.cursor??localView[1],n=state.values[k][index],change=(n/state.values[k][localView[0]]-1)*100;return `<div class="asset-card"><div class="name"><i class="dot" style="background:${coinColor(state.series[k].symbol)}"></i>${escape(assetName(s.symbol))} / USDT</div><div class="numbers"><span class="price">${money(n)}</span><span class="change ${change>=0?'positive':'negative'}">${pct(change)}</span></div>${candleDetails(k,index)}</div>`}).join('');
+ const cardsMarkup=state.series.map((s,k)=>{if(state.expandedChart&&state.mode==='split'&&s.symbol!==state.expandedChart)return '';const localView=chartView(state.mode==='split'?s.symbol:'overlay'),index=state.cursor??localView[1],n=state.values[k][index],change=(n/state.values[k][localView[0]]-1)*100;return `<div class="asset-card"><div class="name"><i class="dot" style="background:${coinColor(state.series[k].symbol)}"></i>${escape(assetName(s.symbol))} / ${quote()}</div><div class="numbers"><span class="price">${money(n)}</span><span class="change ${change>=0?'positive':'negative'}">${pct(change)}</span></div>${candleDetails(k,index)}</div>`}).join('');
  if($('asset-cards')._markup!==cardsMarkup){$('asset-cards').innerHTML=cardsMarkup;$('asset-cards')._markup=cardsMarkup}
  $('cursor-label').textContent=(state.pinned?'Fixiert · ':'')+date(state.times[i])+' · Veränderung seit sichtbarem Start';
 }
@@ -99,7 +112,7 @@ function setChartView(key,view){state.activeChart=key;const keys=state.syncZoom&
 function indexAt(event,svg){const r=svg.getBoundingClientRect(),w=r.width,ratio=Math.max(0,Math.min(1,(event.clientX-r.left-14)/(w-87))),[a,b]=svg._chart.view;return Math.max(a,Math.min(b,nearestTime(state.times[a]+ratio*(state.times[b]-state.times[a]))))}
 function renderCharts(){
  if(!state.times.length)return;
- $('volume-market').hidden=state.mode==='split';$('volume-note').textContent=state.mode==='split'?'Eigene Volumenskala je Markt':'Volumen des gewählten Markts · eigene Skala';
+ $('volume-market').hidden=state.mode==='split';$('volume-note').textContent=state.source==='bitvavo'?'Coin-Volumen · EUR-Umsatz nur Näherung':state.mode==='split'?'Eigene Volumenskala je Markt':'Volumen des gewählten Markts · eigene Skala';
  const chosen=$('chart-focus').value||'all';$('chart-focus').innerHTML='<option value="all">Alle Coins</option>'+state.series.map(s=>`<option value="${escape(s.symbol)}">${escape(assetName(s.symbol))}</option>`).join('');$('chart-focus').value=state.series.some(s=>s.symbol===chosen)?chosen:'all';
  $('chart-focus').hidden=state.mode!=='overlay';$('candle-key').hidden=state.mode!=='overlay'||$('chart-type').value!=='candles';
  $('coin-legend').innerHTML=state.series.filter(s=>!state.expandedChart||state.mode!=='split'||s.symbol===state.expandedChart).map(s=>`<span style="color:${coinColor(s.symbol)}"><i class="dot" style="background:${coinColor(s.symbol)}"></i>${escape(assetName(s.symbol))}</span>`).join('');
@@ -136,14 +149,14 @@ function renderCharts(){
  content+=`<line x1="${xx}" x2="${xx}" y1="${y(transform(p.high,k))}" y2="${y(transform(p.low,k))}" stroke="${stroke}"/><rect x="${xx-bw/2}" y="${yy}" width="${bw}" height="${hh}" fill="${overlay&&up?'none':stroke}" fill-opacity="${overlay?.65:1}" stroke="${stroke}" stroke-width="1"/>`}
  content+='</g>';
  }}
- for(const zone of zones){const k=group.find(k=>state.series[k].symbol===zone.symbol),top=y(transform(zone.high,k)),bottom=y(transform(zone.low,k));content+=`<rect x="14" y="${top-1}" width="${w-87}" height="${Math.max(2,bottom-top)}" fill="${coinColor(zone.symbol)}" fill-opacity=".18" stroke="${coinColor(zone.symbol)}" stroke-dasharray="5 4"/><text x="20" y="${Math.max(36,top-5)}" style="fill:${coinColor(zone.symbol)}">${escape(assetName(zone.symbol))} R${zone.rank} ${money(zone.low)} – ${money(zone.high)} USDT</text>`}
+ for(const zone of zones){const k=group.find(k=>state.series[k].symbol===zone.symbol),top=y(transform(zone.high,k)),bottom=y(transform(zone.low,k));content+=`<rect x="14" y="${top-1}" width="${w-87}" height="${Math.max(2,bottom-top)}" fill="${coinColor(zone.symbol)}" fill-opacity=".18" stroke="${coinColor(zone.symbol)}" stroke-dasharray="5 4"/><text x="20" y="${Math.max(36,top-5)}" style="fill:${coinColor(zone.symbol)}">${escape(assetName(zone.symbol))} R${zone.rank} ${money(zone.low)} – ${money(zone.high)} ${quote()}</text>`}
  for(const zone of liquidations){const k=group.find(k=>state.series[k].symbol===zone.symbol),top=y(transform(zone.high,k)),bottom=y(transform(zone.low,k)),color=zone.side==='long'?'#f48b9c':'#67d9d7',focus=$('chart-focus').value,opacity=state.mode==='overlay'&&focus!=='all'&&focus!==zone.symbol?.12:1;
  content+=`<g opacity="${opacity}"><rect x="14" y="${top}" width="${w-87}" height="${Math.max(2,bottom-top)}" fill="${color}" fill-opacity="${zone.kind==='observed'?.2:(.05+.3*zone.intensity)}" stroke="${color}" stroke-dasharray="${zone.kind==='observed'?'2 3':'7 5'}"/><text x="${w-80}" text-anchor="end" y="${Math.max(36,top-4)}" style="fill:${color};font-size:10px">${escape(assetName(zone.symbol))} ${zone.side==='long'?'Long':'Short'} ${zone.kind==='estimated'?'≈ '+compactAmount(zone.estimatedNotional):compactAmount(zone.notional)} USDT<title>${zone.kind==='estimated'?'Modellschätzung':'Gemeldete Snapshots'} · ${money(zone.low)} – ${money(zone.high)} USDT</title></text></g>`;
  }
  content+='</g>'+`<g transform="translate(0,${extra})">${volumeBars(group,w,a,b)}</g>`;
  content+=`<rect class="price-axis-hit" x="${w-72}" y="20" width="72" height="${192+extra}" fill="transparent" style="cursor:ns-resize"><title>Achse ziehen: vertikal skalieren. Doppelklick: automatisch skalieren.</title></rect>`;
  content+=`<g class="measurement-overlay" pointer-events="none"></g><g class="cursor" pointer-events="none"></g><rect class="selection" y="20" height="${260+extra}" fill="#d7f58a18" stroke="#d7f58a66" visibility="hidden"/>`;
- wrap.innerHTML=(state.mode==='split'?`<span class="chart-name">${escape(state.series[group[0]].symbol)}</span>`:'')+`<svg style="height:${h}px" viewBox="0 0 ${w} ${h}" role="img" aria-label="Interaktiver Kursvergleich" tabindex="0">${content}</svg>`;
+ wrap.innerHTML=(state.mode==='split'?`<span class="chart-name">${escape(displaySymbol(state.series[group[0]].symbol))}</span>`:'')+`<svg style="height:${h}px" viewBox="0 0 ${w} ${h}" role="img" aria-label="Interaktiver Kursvergleich" tabindex="0">${content}</svg>`;
  const zoomControls=document.createElement('div');zoomControls.className='chart-zoom-controls';zoomControls.innerHTML='<button type="button" class="zoom-out" aria-label="Chart verkleinern" title="Herauszoomen">−</button><button type="button" class="zoom-in" aria-label="Chart vergrößern" title="Hineinzoomen">+</button>';zoomControls.style.top=(h-70)+'px';zoomControls.style.bottom='auto';wrap.append(zoomControls);
  zoomControls.querySelector('.zoom-in').onclick=()=>zoomTime(.7,svg._chart);zoomControls.querySelector('.zoom-out').onclick=()=>zoomTime(1/.7,svg._chart);
 
@@ -202,7 +215,7 @@ function runScan(fit=true){
  if(fit){state.axisRanges={};state.syncAxis={};}renderCharts();
  $('pair-summary').innerHTML='';
  if(!state.hits.length){$('scan-results').innerHTML='<p>Keine bestätigten Widerstandszonen gefunden. Im geladenen Zeitraum liegen nicht genügend wiederholte, bestätigte Hochs über dem aktuellen Kurs vor.</p>';return}
- $('scan-results').innerHTML=`<table><thead><tr><th>Coin</th><th>Gewichtung</th><th>Zone (USDT)</th><th>Abstand</th><th>Berührungen</th><th>Zuletzt bestätigt (UTC)</th><th>Status</th><th></th></tr></thead><tbody>${state.hits.map((z,i)=>`<tr><td><span style="color:${coinColor(z.symbol)}">${escape(assetName(z.symbol))}</span></td><td>R${z.rank} · ${z.score.toFixed(1)}</td><td>${money(z.low)} – ${money(z.high)}</td><td>${z.distance.toFixed(2)} %</td><td>${z.touches}</td><td>${date(z.last)}</td><td>${z.inside?'Kurs in Zone':'Über letztem Kurs'}</td><td><button class="subtle resistance-open" data-zone="${i}">Im Chart ↗</button></td></tr>`).join('')}</tbody></table>`;
+ $('scan-results').innerHTML=`<table><thead><tr><th>Coin</th><th>Gewichtung</th><th>Zone (${quote()})</th><th>Abstand</th><th>Berührungen</th><th>Zuletzt bestätigt (UTC)</th><th>Status</th><th></th></tr></thead><tbody>${state.hits.map((z,i)=>`<tr><td><span style="color:${coinColor(z.symbol)}">${escape(assetName(z.symbol))}</span></td><td>R${z.rank} · ${z.score.toFixed(1)}</td><td>${money(z.low)} – ${money(z.high)}</td><td>${z.distance.toFixed(2)} %</td><td>${z.touches}</td><td>${date(z.last)}</td><td>${z.inside?'Kurs in Zone':'Über letztem Kurs'}</td><td><button class="subtle resistance-open" data-zone="${i}">Im Chart ↗</button></td></tr>`).join('')}</tbody></table>`;
  $('scan-results').querySelectorAll('.resistance-open').forEach(button=>button.onclick=()=>{
  const zone=state.hits[Number(button.dataset.zone)];
  for(const key of Object.keys(state.axisRanges))if(key.includes(':'+zone.symbol+':')||key.startsWith('overlay:'))delete state.axisRanges[key];state.syncAxis={};
@@ -245,7 +258,7 @@ function renderMeasurement(){
  const first=nearestTime(start),last=nearestTime(end),changes=measurementChanges(state.values,first,last);
  const provisional=state.candles.some(c=>c[first].closed===false||c[last].closed===false);
  box.hidden=false;
- box.innerHTML=`<div class="measurement-heading"><span><strong>Messung · Schlusskurs → Schlusskurs</strong><br>${date(start)} → ${date(end)}${provisional?' · laufende Kerze, vorläufig':''}</span><button id="clear-measurement" class="subtle">Messung löschen ×</button></div><div class="measurement-values">${changes.map((m,k)=>`<div><span>${escape(assetName(state.series[k].symbol))}</span><strong class="${m.change>=0?'positive':'negative'}">${pct(m.change)}</strong><small>${money(m.start)} → ${money(m.end)} USDT</small></div>`).join('')}</div>`;
+ box.innerHTML=`<div class="measurement-heading"><span><strong>Messung · Schlusskurs → Schlusskurs</strong><br>${date(start)} → ${date(end)}${provisional?' · laufende Kerze, vorläufig':''}</span><button id="clear-measurement" class="subtle">Messung löschen ×</button></div><div class="measurement-values">${changes.map((m,k)=>`<div><span>${escape(assetName(state.series[k].symbol))}</span><strong class="${m.change>=0?'positive':'negative'}">${pct(m.change)}</strong><small>${money(m.start)} → ${money(m.end)} ${quote()}</small></div>`).join('')}</div>`;
  $('clear-measurement').onclick=()=>{state.measurement=null;renderMeasurement()};
  document.querySelectorAll('svg').forEach(svg=>{const c=svg._chart;if(!c)return;const [a,b]=c.view;if(last<a||first>b)return;
  const x1=xFor(Math.max(a,first),c.w,c.view),x2=xFor(Math.min(b,last),c.w,c.view),g=svg.querySelector('.measurement-overlay');
@@ -282,12 +295,13 @@ async function refreshOpenInterest(force=false){
  if(!state.oiEnabled||!state.series.length||!force&&Date.now()-state.oiFetchedAt<60000)return;
  const revision=++state.oiRevision;state.oiFetchedAt=Date.now();$('open-interest-status').textContent='Open Interest wird von Binance Futures geladen …';
  try{const end=Math.min(Date.now(),state.times.at(-1));const result=await api('/api/open-interest?'+new URLSearchParams({symbols:state.series.map(s=>s.symbol).join(','),interval:state.interval,start:state.loadedStart,end}));if(revision!==state.oiRevision||!state.oiEnabled)return;state.oiData=result;
- $('open-interest-status').textContent=result.some(d=>d.error)?'Open Interest teilweise nicht verfügbar · Details am Chart':'Echtes Open Interest · Binance USD-M · Abruf alle 60s · Historie mindestens 5m · keine Liquidationspreis-Verteilung';renderCharts();
+ $('open-interest-status').textContent=result.some(d=>d.error)?'Open Interest teilweise nicht verfügbar · Details am Chart':'Echtes Open Interest · Binance USD-M · externe USDT-Referenz, keine Bitvavo-Positionen · Abruf alle 60s · Historie mindestens 5m · keine Liquidationspreis-Verteilung';renderCharts();
  }catch(e){if(revision!==state.oiRevision)return;state.oiData=state.series.map(s=>({symbol:s.symbol,points:[],error:e.message}));$('open-interest-status').textContent='Open Interest nicht verfügbar · '+e.message;renderCharts()}
 }
 $('open-interest-toggle').onclick=()=>{state.oiEnabled=!state.oiEnabled;state.oiRevision++;$('open-interest-toggle').textContent=state.oiEnabled?'Open Interest an':'Open Interest aus';$('open-interest-toggle').setAttribute('aria-pressed',String(state.oiEnabled));$('open-interest-toggle').classList.toggle('active',state.oiEnabled);$('open-interest-status').hidden=!state.oiEnabled;if(state.oiEnabled)refreshOpenInterest(true);renderCharts()};
 async function refreshLiquidations(){
  const revision=++state.liquidationRevision,mode=state.liquidationMode;
+ if(state.source==='bitvavo'){state.liquidationZones=[];$('liquidation-chart-status').textContent='Binance-Liquidationszonen sind USDT-Referenzen und werden nicht auf EUR-Kurse übertragen. Für diese Ansicht Binance wählen.';return}
  if(mode==='off'){state.liquidationZones=[];renderLiquidations();renderCharts();return}
  if(!state.series.length){$('liquidation-chart-status').textContent='Zuerst einen Markt laden.';return}
  state.liquidationZones=[];$('liquidation-chart-status').textContent='Liquidationsansicht wird geladen …';
@@ -363,9 +377,11 @@ $('search-results').onkeydown=e=>{if(e.key==='Escape'){$('search-results').hidde
  ['start','end','interval'].forEach(id=>$(id).onchange=dirty);
  $('hide-resistances').onclick=()=>{resetScan();renderCharts()};
  let resize;window.addEventListener('resize',()=>{clearTimeout(resize);resize=setTimeout(renderCharts,100)});
+ $('exchange-source').onchange=()=>{if(state.busy)return;state.source=$('exchange-source').value;state.oiRevision++;state.liquidationRevision++;state.oiData=[];state.modelSummaries=[];state.liquidationZones=[];state.liquidationStatus=null;state.liquidationMode='off';$('liquidation-mode').value='off';state.selected=['BTCUSDT','FETUSDT'];state.markets=[];state.lastSuccess=0;state.dirty=true;clearData();renderLiquidations();connect()};
+ $('try-binance').onclick=()=>{if(state.busy)return;$('exchange-source').value='binance';$('exchange-source').onchange()};
  $('end').disabled=$('auto-live').checked;setDates(7);renderSelected();connect();
 
 $('auto-live').onchange=()=>{$('end').disabled=$('auto-live').checked;dirty()};
 $('scan-all').onclick=async()=>{if(state.busy)return;state.dirty=true;state.selected=SYMBOLS.filter(s=>state.markets.some(m=>m.symbol===s));renderSelected();await load();if(!state.dirty&&state.series.length)runScan()};
-$('export').onclick=()=>{if(!state.hits.length){notice('Zuerst Widerstandszonen berechnen.');return}const rows=[['Coin','Zone unten USDT','Zone oben USDT','Abstand %','Beruehrungen','Erstes Hoch UTC','Letztes Hoch UTC'],...state.hits.map(z=>[z.symbol,z.low,z.high,z.distance,z.touches,new Date(z.first).toISOString(),new Date(z.last).toISOString()])];const url=URL.createObjectURL(new Blob(['\ufeff'+rows.map(r=>r.join(';')).join('\n')],{type:'text/csv;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download='stockscreen-widerstaende.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+$('export').onclick=()=>{if(!state.hits.length){notice('Zuerst Widerstandszonen berechnen.');return}const rows=[['Coin','Zone unten '+quote(),'Zone oben '+quote(),'Abstand %','Beruehrungen','Erstes Hoch UTC','Letztes Hoch UTC'],...state.hits.map(z=>[z.symbol,z.low,z.high,z.distance,z.touches,new Date(z.first).toISOString(),new Date(z.last).toISOString()])];const url=URL.createObjectURL(new Blob(['\ufeff'+rows.map(r=>r.join(';')).join('\n')],{type:'text/csv;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download='stockscreen-widerstaende.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 setInterval(()=>{if($('auto-live').checked&&state.lastSuccess&&Date.now()-state.lastSuccess>45000){$('data-badge').textContent='VERALTET';$('connection').textContent='○ Live-Aktualisierung ausstehend'}if(!document.hidden&&$('auto-live').checked&&!state.dirty&&!state.busy&&!state.axisDragging&&!state.panDragging&&!state.resizingChart&&state.series.length)load(true)},15000);

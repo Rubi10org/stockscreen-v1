@@ -151,6 +151,38 @@ class AnalysisTests(unittest.TestCase):
         self.assertFalse(error.value,'JS evaluation threw an exception')
         self.assertTrue(self.js.JSValueToBoolean(self.ctx,result))
 
+    def test_research_report_renders_scope_scores_and_escapes_text(self):
+        import json
+        from pathlib import Path
+        source=Path('static/research.js').read_text().replace('export ','').split('let loading=false;')[0]
+        factory='new Function("document",'+json.dumps(source+';return renderResearch;')+')'
+        script='''(function(){const nodes={};const doc={getElementById:id=>nodes[id]||(nodes[id]={})};
+        const render=FACTORY(doc);render({suite:{status:'running',profile:'full',errors:[]},datasets:[{venue:'bitvavo',symbol:'BTCUSDT',quote:'EUR',candles:100,expected:8760,coveragePct:1,longestContiguous:100}],studies:[{venue:'binance',symbol:'FETUSDT',quote:'USDT',profile:'pilot',status:'error',completedWindows:2,plannedWindows:12,error:'<img src=x>',test:{windows:2,modelMAPE:1,baselineMAPE:2}}],journal:{forecasts:1,completedForecasts:0,scoredTargets:0,note:'Noch keine bewerteten Kurse'}});
+        return nodes['research-data'].innerHTML.includes('BTC/EUR')&&nodes['research-studies'].innerHTML.includes('FET/USDT')&&nodes['research-studies'].innerHTML.includes('&lt;img')&&!nodes['research-studies'].innerHTML.includes('<img')&&nodes['research-journal'].textContent.includes('0 bewertete Zielkurse');})()'''
+        self.check_js(script.replace('FACTORY',factory))
+
+    def forecast_plan_js(self,expression):
+        import json
+        from pathlib import Path
+        source=Path('static/forecast-position.js').read_text().replace('export ','').split('const f=n=>')[0]
+        fixture='''const now=200*3600000+300000,asof=200*3600000;
+        function fixture(direction=1,move=10){return {quote:'EUR',dataAsOf:asof,generatedAt:now-60000,history:Array.from({length:128},(_,i)=>({time:asof-(127-i)*3600000,high:100.1,low:99.9,close:100})),points:Array.from({length:24},(_,i)=>({time:asof+(i+1)*3600000,median:100+direction*(i+1)*move/24,close:100+direction*(i+1)*move/24,p10:(100+direction*(i+1)*move/24)*.98,p90:(100+direction*(i+1)*move/24)*1.02})),validation:{available:true,beatsBaselineMAE:true}};}
+        const quote={price:100,retrievedAt:now};'''
+        factory='new Function('+json.dumps(source+'\n'+fixture+'\nreturn '+expression+';')+')'
+        self.check_js(factory+'()')
+
+    def test_forecast_plans_have_correct_long_short_levels_and_fixed_entry(self):
+        self.forecast_plan_js('''(()=>{const l=analyzeForecast(fixture(),quote,now),s=analyzeForecast(fixture(-1),quote,now),m=analyzeForecast(fixture(),{price:100.03,retrievedAt:now},now);return !l.reasons.length&&!s.reasons.length&&l.plan.stop<l.plan.zone[0]&&l.plan.target1>l.plan.zone[1]&&l.plan.target2>l.plan.target1&&s.plan.stop>s.plan.zone[1]&&s.plan.target2<s.plan.target1&&s.plan.target1<s.plan.zone[0]&&l.plan.rr>=2&&s.plan.rr>=2&&l.plan.entry===m.plan.entry;})()''')
+
+    def test_forecast_plans_reject_costs_and_failed_comparison(self):
+        self.forecast_plan_js('''(()=>{const weak=analyzeForecast(fixture(1,.1),quote,now),bad=fixture();bad.validation.beatsBaselineMAE=false;const missing=fixture();delete missing.validation;return weak.reasons.some(s=>s.includes('2:1'))&&analyzeForecast(bad,quote,now).reasons.some(s=>s.includes('Referenz'))&&analyzeForecast(missing,quote,now).reasons.length>0;})()''')
+
+    def test_forecast_plans_reject_stale_quotes_outside_entry_and_old_models(self):
+        self.forecast_plan_js('''(()=>{const stale=fixture();stale.generatedAt=now-3600001;return !analyzeForecast(stale,quote,now).plan&&!analyzeForecast(fixture(),{price:100,retrievedAt:now-60001},now).plan&&analyzeForecast(fixture(),{price:104,retrievedAt:now},now).reasons.some(s=>s.includes('Entry-Zone'));})()''')
+
+    def test_forecast_plans_do_not_use_invalid_or_gapped_stop_candles(self):
+        self.forecast_plan_js('''(()=>{const gaps=fixture();gaps.history.at(-5).time-=3600000;const wrong=fixture();wrong.quote='USDT';return !analyzeForecast(gaps,quote,now).plan&&!analyzeForecast(wrong,quote,now).plan;})()''')
+
     def test_app_javascript_syntax(self):
         from pathlib import Path
         import json
@@ -236,6 +268,47 @@ class AnalysisTests(unittest.TestCase):
 
     def test_model_discards_crossed_long_thresholds(self):
         self.check_js("(function(){const m=oiLiquidationEstimates({step:1,currentCoins:110,markPrice:100,points:[{time:0,coins:100},{time:1,coins:110},{time:2,coins:110}],marks:[{time:0,low:99,high:101,close:100},{time:1,low:99,high:101,close:100},{time:2,low:50,high:101,close:100}]});return m.zones.filter(z=>z.side==='long').length===0;})()")
+
+    def position_js(self, expression):
+        from pathlib import Path
+        self.check_js(Path('static/positions-model.js').read_text().replace('export ', '')+'\n'+expression)
+
+    def test_positions_page_module_syntax_and_controls(self):
+        from pathlib import Path
+        import json, re
+        script=Path('static/kronos.js').read_text()
+        plain=re.sub(r'^import .*?;\n','',script,flags=re.M)
+        self.check_js('typeof new Function('+json.dumps(plain)+') === "function"')
+        html=Path('static/positions.html').read_text()
+        self.assertFalse(set(re.findall(r"\$\('([^']+)'\)",script))-set(re.findall(r'id="([^"]+)"',html)))
+        self.assertIn('/positions.html',Path('static/index.html').read_text())
+        self.assertNotIn('<input',html)
+        self.check_js('typeof new Function('+json.dumps(Path('static/kronos-chart.js').read_text().replace('export ',''))+') === "function"')
+
+    def test_position_chart_has_future_zone_and_excludes_rejected_plans(self):
+        from pathlib import Path
+        script=Path('static/position-chart.js').read_text().replace('export ', '')
+        self.check_js(script+""";(function(){const points=[{time:0,open:100,high:102,low:99,close:101}];const plan={side:'long',entry:102,stop:98,targets:[{low:110,high:111}]};const plotted=positionChart(points,101,[plan]),empty=positionChart(points,101,[{...plan,reason:'no setup'}]);return plotted.includes('LONG Ziel 1')&&plotted.includes('Zeitpunkt offen')&&!plotted.includes('NaN')&&!empty.includes('LONG Ziel 1')&&positionChart([],101,[])==='';})()""")
+
+    def test_detailed_kronos_report_syntax_and_element_ids(self):
+        from pathlib import Path
+        import json,re
+        script=Path('static/kronos-report.js').read_text().replace('export ','')
+        self.check_js('typeof new Function('+json.dumps(script)+') === "function"')
+        html=Path('static/positions.html').read_text()
+        self.assertFalse(set(re.findall(r"\$\('([^']+)'\)",script))-set(re.findall(r'id="([^"]+)"',html)))
+
+    def test_positions_budget_and_zero_risk_rejection(self):
+        self.position_js("positionPlans([],[],{risk:0}).plans.length===0&&positionPlans([],[],{risk:6}).error!==null&&positionPlans([],[],{risk:1,dailyLoss:4,openRisk:1}).error!==null")
+
+    def test_positions_size_capped_and_targets_on_correct_side(self):
+        self.position_js("""(function(){const p=Array.from({length:60},(_,i)=>({time:i,close:100+i,high:101+i,low:99+i,closed:true}));const z=[{side:'short',low:180,high:181,estimatedNotional:1000},{side:'long',low:90,high:91}];const r=positionPlans(p,z,{risk:5,dailyLoss:3,openRisk:1,capital:100,leverage:3,cost:.5,step:1});const a=r.plans[0];return r.budget===1&&!a.reason&&a.stop<a.entry&&a.targets.every(t=>t.price>a.entry)&&a.plannedLoss<=1.00000001&&a.notional<=300&&r.plans[1].reason!==null;})()""")
+
+    def test_positions_refuse_gaps_and_missing_liquidation_targets(self):
+        self.position_js("""(function(){const p=Array.from({length:60},(_,i)=>({time:i,close:100+i,high:101+i,low:99+i,closed:true}));const noTargets=positionPlans(p,[],{step:1});p[40].time+=.5;return noTargets.plans.every(p=>p.reason)&&positionPlans(p,[],{step:1}).error.includes('Datenlücken');})()""")
+
+    def test_positions_reversal_requires_sweep_and_return(self):
+        self.position_js("""(function(){const p=Array.from({length:60},(_,i)=>({time:i,close:100,high:101,low:99,closed:true}));const z=[{side:'short',low:120,high:121},{side:'long',low:80,high:81}];const a=positionPlans(p,z,{strategy:'reversal',step:1});p[59]={time:59,close:100,high:101,low:97,closed:true};const b=positionPlans(p,z,{strategy:'reversal',step:1});return a.plans.every(p=>p.reason)&&!b.plans[0].reason&&b.plans[1].reason!==null;})()""")
 
     def test_alignment_uses_intersection(self):
         self.check_js("JSON.stringify(align([{points:[{time:1,close:2},{time:2,close:3}]},{points:[{time:2,close:4},{time:3,close:5}]}]))===JSON.stringify({times:[2],values:[[3],[4]]})")
