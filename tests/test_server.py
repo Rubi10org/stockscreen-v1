@@ -151,6 +151,77 @@ class AnalysisTests(unittest.TestCase):
         self.assertFalse(error.value,'JS evaluation threw an exception')
         self.assertTrue(self.js.JSValueToBoolean(self.ctx,result))
 
+    def test_drawing_survives_child_capture_loss_and_unavailable_capture(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn='function startDrawingGesture('+app.split('function startDrawingGesture(',1)[1].split('async function enterChartFocus(',1)[0]
+        setup="""
+        const state={series:[{symbol:'BTCUSDT'}],values:[[100]],drawingSync:false,drawingTool:'line',drawings:{}};
+        const listeners={},areaListeners={};let saves=0;
+        const window={addEventListener:(n,f)=>listeners[n]=f,removeEventListener:n=>delete listeners[n]};
+        const svg={_chart:{group:[0],chartKey:'BTCUSDT'}};
+        const area={setPointerCapture:()=>{throw Error('not supported')},hasPointerCapture:()=>false,
+        querySelectorAll:()=>[svg],addEventListener:(n,f)=>areaListeners[n]=f,removeEventListener:n=>delete areaListeners[n]};
+        const $=id=>id==='chart-area'?area:{};
+        const indexAt=()=>0,drawingKey=s=>s,drawingPoint=e=>({time:e.x,price:100+e.x});
+        const projectDrawing=(d,a)=>({...d,points:d.points.map(p=>({...p}))});
+        const renderDrawings=()=>{},saveDrawings=()=>saves++;
+        """
+        expression="""
+        startDrawingGesture({pointerId:7,x:1},svg);
+        areaListeners.lostpointercapture({pointerId:7,type:'lostpointercapture',target:svg});
+        if(!state.drawingGesture)return false;
+        listeners.pointermove({pointerId:7,x:2,preventDefault:()=>{}});
+        listeners.pointerup({pointerId:7,type:'pointerup',x:3,preventDefault:()=>{}});
+        return !state.drawingGesture&&saves===1&&state.drawings.BTCUSDT[0].points[1].time===3&&Object.keys(listeners).length===0&&Object.keys(areaListeners).length===0;
+        """
+        for tool in ['line', 'price-range']:
+            with self.subTest(tool=tool):
+                self.check_js('(function(){'+setup.replace("drawingTool:'line'","drawingTool:'"+tool+"'")+fn+expression+'})()')
+
+    def test_synchronous_drawing_preserves_times_and_relative_prices(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn=app.split('function projectDrawing(',1)[1].split('function validateDrawings(',1)[0]
+        self.check_js('(function(){function projectDrawing('+fn+"const d={id:'test',type:'line',anchor:100000,points:[{time:12,price:101000},{time:15,price:99000}]},p=projectDrawing(d,.2);return p.id===d.id&&p.points[0].time===12&&Math.abs(p.points[0].price-.202)<1e-10&&Math.abs(p.points[1].price-.198)<1e-10&&d.points[0].price===101000;})()")
+
+    def test_price_range_renders_directional_change_and_vertical_selection(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn='function priceRangeMarkup('+app.split('function priceRangeMarkup(',1)[1].split('function drawingPoint(',1)[0]
+        setup="const money=String,pct=n=>(n>=0?'+':'')+n+'%',quote=()=> 'EUR',escape=String;"
+        self.check_js('(function(){'+setup+fn+"""
+        const chart={w:800,extra:0},x=t=>t,y=p=>202-p;
+        const up=priceRangeMarkup([{time:100,price:100},{time:200,price:125}],x,y,chart);
+        const down=priceRangeMarkup([{time:200,price:125},{time:100,price:100}],x,y,chart);
+        const vertical=priceRangeMarkup([{time:100,price:100},{time:100,price:125}],x,y,chart);
+        return up.includes('+25 EUR (+25%)')&&up.includes('#7fdfb8')&&down.includes('-25 EUR (-20%)')&&down.includes('#f48b9c')&&!vertical.includes('NaN')&&!vertical.includes('Infinity')&&vertical.includes('width="1"')&&priceRangeMarkup([{time:100,price:100}],x,y,chart)==='';
+        """+'})()')
+
+    def test_price_range_persistence_requires_two_valid_anchors(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn='function validateDrawings('+app.split('function validateDrawings(',1)[1].split('function saveDrawings(',1)[0]
+        self.check_js('(function(){'+fn+"""
+        const range={id:'range-1',type:'price-range',points:[{time:1,price:100},{time:2,price:125}]};
+        const stored=JSON.parse(JSON.stringify({'bitvavo:BTCUSDT':[range,{...range,points:[range.points[0]]}]}));
+        const restored=validateDrawings(stored)['bitvavo:BTCUSDT'];
+        return restored.length===1&&restored[0].type==='price-range'&&restored[0].points[1].price===125;
+        """+'})()')
+
+    def test_saved_drawings_validate_market_namespace_and_coordinates(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn=app.split('function validateDrawings(',1)[1].split('function saveDrawings(',1)[0]
+        self.check_js('(function(){function validateDrawings('+fn+"const good={id:'draw-1',type:'line',points:[{time:1,price:100}]};const clean=validateDrawings({'bitvavo:BTCUSDT':[good,{...good,id:'<script>'},{...good,points:[{time:1,price:NaN}]},{...good,type:'bad'}],'binance:FETUSDT':[good],'other:BTCUSDT':[good]});return clean['bitvavo:BTCUSDT'].length===1&&clean['binance:FETUSDT'].length===1&&!clean['other:BTCUSDT']&&Object.keys(validateDrawings(null)).length===0;})()")
+
+    def test_drawing_pointer_maps_price_and_percent_scales_to_same_raw_price(self):
+        from pathlib import Path
+        app=Path('static/app.js').read_text()
+        fn=app.split('function drawingPoint(',1)[1].split('function startDrawingGesture(',1)[0]
+        setup="const state={times:[1000,2000],values:[[200,220]]};const indexAt=()=>1;const svg={getBoundingClientRect:()=>({top:0,height:320}),_chart:{group:[0],view:[0,1],min:180,max:220,extra:0,percent:false}};"
+        self.check_js('(function(){'+setup+'function drawingPoint('+fn+"const raw=drawingPoint({clientY:116},svg);svg._chart={...svg._chart,percent:true,min:-10,max:10};const percent=drawingPoint({clientY:116},svg);return raw.time===2000&&raw.price===200&&percent.price===raw.price;})()")
+
     def test_research_report_renders_scope_scores_and_escapes_text(self):
         import json
         from pathlib import Path

@@ -236,6 +236,10 @@ python3 -m unittest discover -s tests -v
 
 Berechnungs-Tests nutzen unter macOS die vorhandene JavaScriptCore-Systembibliothek. Auf Systemen ohne diese Bibliothek werden diese Tests übersprungen. Die Tests mit simuliertem Transport ersetzen keine erfolgreiche echte Live-Prüfung.
 
+**2-Chart-Fokus:** Genau zwei Märkte laden und „⛶ 2-Chart-Fokus“ anklicken. Beide Charts füllen den Bildschirm nebeneinander; sichtbar bleibt nur eine kompakte Werkzeugleiste. „✕ Zurück“ oder Escape stellt die vorherige Ansicht wieder her. Falls der Browser natives Vollbild blockiert, füllt die Ansicht das Browserfenster.
+
+Zeichenwerkzeuge: Trendlinie, Freihand, horizontale Linie und Preisspanne. Die Preisspanne zeigt zwischen zwei frei gewählten Kursniveaus den Betrag in EUR/USDT, die prozentuale Veränderung vom Startkurs und beide Kurswerte. Grün bedeutet Anstieg, Rot Rückgang; auch vertikales Ziehen am selben Zeitpunkt ist möglich. Im 2-Chart-Fokus ist die Trendlinie beim Öffnen direkt aktiv. Mit gedrückter linker Maustaste im Chart ziehen; „✎ Zeichnen an/aus“ wechselt zwischen Zeichnen und Verschieben. „Zeichnen separat“ zeichnet nur im jeweiligen Chart; „Zeichnen synchron“ überträgt neue Zeichnungen mit identischen Zeitpunkten und prozentualen Preisabständen zum Schlusskurs am Startpunkt auf beide Märkte. Zoom-Synchronisierung ist separat schaltbar. Zeichnungen bleiben an Zeit und Preis verankert, werden pro Börse und Markt im Browser gespeichert und lassen sich rückgängig machen oder löschen. Ein Wechsel der Zeichen-Synchronisierung verändert bestehende Zeichnungen nicht.
+
 Vollbild: Die Schaltfläche „Vollbild“ öffnet den gesamten Chartbereich inklusive aller ausgewählten Charts und Bedienelemente. Erneut klicken oder Escape drücken beendet Vollbild. Funktioniert in getrennter und überlagerter Ansicht.
 
 ## Widerstands-Tool (ersetzt den Bewegungsscanner)
